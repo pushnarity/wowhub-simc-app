@@ -316,12 +316,49 @@ protected:
     }
   };
 
+  // wowhub: Contrition - every healing Penance bolt also heals everyone with Atonement (197419). The game
+  // logs crits as 281469; they make no Divine Aegis.
+  struct contrition_t : public priest_heal_t
+  {
+    contrition_t( priest_t& p ) : priest_heal_t( "contrition", p, p.find_spell( 270501 ) )
+    {
+      background = dual = proc = true;
+      may_crit     = true;
+      aoe          = -1;
+      disc_mastery = true;
+      divine_aegis = false;
+      auto_target  = false;
+      harmful      = false;
+      // the heal value lives on the passive's second effect
+      parse_effect_data( p.find_spell( 197419 )->effectN( 2 ) );
+    }
+
+    size_t available_targets( std::vector<player_t*>& target_list ) const override
+    {
+      target_list.clear();
+      for ( auto t : p().allies_with_atonement )
+        target_list.push_back( t );
+      return target_list.size();
+    }
+
+    void activate() override
+    {
+      priest_heal_t::activate();
+      priest().allies_with_atonement.register_callback( [ this ]( player_t* ) { target_cache.is_valid = false; } );
+    }
+  };
+
   struct penance_heal_t : public priest_heal_t
   {
-    // TODO: implement contrition
-    penance_heal_t( priest_t& p, util::string_view n, const spell_data_t* s ) : priest_heal_t( n, p, s )
+    contrition_t* contrition;
+
+    penance_heal_t( priest_t& p, util::string_view n, const spell_data_t* s )
+      : priest_heal_t( n, p, s ),
+        contrition( p.find_spell( 197419 )->ok() && p.specialization() == PRIEST_DISCIPLINE ? new contrition_t( p ) : nullptr )
     {
       background = dual = direct_tick = tick_may_crit = may_crit = true;
+      if ( contrition )
+        add_child( contrition );
     }
 
     action_state_t* new_state() override
@@ -351,6 +388,9 @@ protected:
     void execute() override
     {
       priest_heal_t::execute();
+
+      if ( contrition && !p().allies_with_atonement.empty() )
+        contrition->execute_on_target( p().allies_with_atonement[ 0 ] );
 
       if ( priest().talents.discipline.holy_ray.enabled() )
       {
@@ -884,6 +924,54 @@ void priest_t::init_spells_discipline()
 
   specs.contrition_heal      = find_spell( 270501 );
   specs.contrition_heal_crit = find_spell( 281469 );
+}
+
+// ==========================================================================
+// wowhub: Discipline healing priority for healing sims. Upstream's list with two changes measured on real
+// logs: Surge of Light Flash Heals are used freely, and Flash Heal replaces Smite while mana is ahead of an
+// even spend over the fight (top priests cast ~32 Flash Heals in 5 minutes and still end with mana).
+// ==========================================================================
+void priest_t::apl_discipline_heal()
+{
+  action_priority_list_t* default_  = get_action_priority_list( "default" );
+  action_priority_list_t* precombat = get_action_priority_list( "precombat" );
+  action_priority_list_t* shield    = get_action_priority_list( "shield" );
+
+  precombat->add_action( "snapshot_stats" );
+  precombat->add_action( "variable,name=trinket_1_ogcd_cast,value=trinket.1.is.soulcoiler_ritual_vessel" );
+  precombat->add_action( "variable,name=trinket_2_ogcd_cast,value=trinket.2.is.soulcoiler_ritual_vessel" );
+  precombat->add_action( "flash_heal,target_if=target!=self" );
+  precombat->add_action( "power_word_radiance,target_if=min:debuff.atonement.remains+10*(target=self)" );
+  precombat->add_action( "power_word_radiance,target_if=min:debuff.atonement.remains+10*(target=self)" );
+  precombat->add_action( "evangelism,target_if=min:debuff.atonement.remains+10*(target=self)" );
+  precombat->add_action( "mind_blast" );
+  shield->add_action( "void_shield,target_if=min:debuff.atonement.remains+10*(target=self)+100*(!debuff.atonement.up)" );
+  shield->add_action( "power_word_shield,target_if=min:debuff.atonement.remains+10*(target=self)+100*(!debuff.atonement.up),if=talent.borrowed_time&(mana.pct*2.5>=fight_remains|talent.shield_discipline&mana.pct*6>=fight_remains)" );
+  default_->add_action( "shadow_word_pain,if=refreshable" );
+  default_->add_action( "power_infusion" );
+  default_->add_action( "invoke_external_buff,name=power_infusion" );
+  default_->add_action( "potion" );
+  default_->add_action( "desperate_prayer,if=health.pct<=40" );
+  default_->add_action( "arcane_torrent,if=mana.pct<=95" );
+  default_->add_action( "use_item,name=hex_lords_dooming_idol,if=buff.hex_lords_doom.stack>=5|fight_remains<=30" );
+  default_->add_action( "use_item,slot=trinket1,if=!variable.trinket_1_ogcd_cast" );
+  default_->add_action( "use_item,slot=trinket2,if=!variable.trinket_2_ogcd_cast" );
+  default_->add_action( "use_item,use_off_gcd=1,slot=trinket1,if=variable.trinket_1_ogcd_cast&gcd.remains>=0.75*gcd.max" );
+  default_->add_action( "use_item,use_off_gcd=1,slot=trinket2,if=variable.trinket_2_ogcd_cast&gcd.remains>=0.75*gcd.max" );
+  default_->add_action( "flash_heal,target_if=min:debuff.atonement.remains+20*(target=self),if=buff.surge_of_light.up" );
+  default_->add_action( "mind_blast" );
+  default_->add_action( "evangelism,target_if=min:debuff.atonement.remains+10*(target=self)" );
+  default_->add_action( "uppies,nested_action=void_shield" );
+  default_->add_action( "void_blast,if=buff.greater_smite.remains<=gcd.max*2&buff.greater_smite.remains>=execute_time" );
+  default_->add_action( "power_word_radiance,target_if=min:debuff.atonement.remains+10*(target=self),if=cooldown.mind_blast.remains<=gcd.max*2" );
+  default_->add_action( "penance,target_if=max:dot.shadow_word_pain.remains,interrupt_if=gcd.remains<=0&buff.entropic_rift.up,interrupt_immediate=1,if=cooldown.mind_blast.remains>=2+gcd.max|!set_bonus.mid2_2pc" );
+  default_->add_action( "call_action_list,name=shield,if=buff.master_the_darkness.up|cooldown.penance.remains<=gcd.max|active_atonements<=5" );
+  default_->add_action( "shadow_word_death,if=target.health.pct<=20&(talent.shadowfiend|!buff.entropic_rift.up)|talent.expiation|talent.inescapable_torment&(pet.shadowfiend.active|pet.voidwraith.active|pet.mindbender.active)" );
+  default_->add_action( "flash_heal,target_if=min:debuff.atonement.remains+20*(target=self),if=buff.atonement.remains<=gcd.max&(mana.pct*2.5*3>=fight_remains|talent.shield_discipline&mana.pct*6*3>=fight_remains|mana.pct>=90)" );
+  default_->add_action( "void_blast" );
+  default_->add_action( "power_word_radiance,target_if=min:debuff.atonement.remains+10*(target=self)" );
+  default_->add_action( "flash_heal,target_if=min:debuff.atonement.remains+20*(target=self),if=mana.pct>=40+50*fight_remains%(time+fight_remains)" );
+  default_->add_action( "smite" );
 }
 
 action_t* priest_t::create_action_discipline( util::string_view name, util::string_view options_str )

@@ -584,6 +584,9 @@ struct sim_t : private sc_thread_t
   std::string heal_damage_profile;
   std::string heal_replay;  // file with a real fight's hits and other healers' heals per target
   double heal_damage_scale;
+  // called whenever incoming damage lands on a healing target (or a replayed hit on the healer), for
+  // "the next time they take damage" heals like Prayer of Mending
+  std::vector<std::function<void( player_t* )>> heal_hurt_callbacks;
   double dhaps_healing_weight;
   double scaling_normalized;
   bool merge_enemy_priority_dmg;

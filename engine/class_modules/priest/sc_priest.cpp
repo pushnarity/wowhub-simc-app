@@ -57,6 +57,10 @@ struct power_word_shield_buff_t : public priest_buff_t<absorb_buff_t>
         priest().resource_gain( RESOURCE_MANA, energize_amount, priest().gains.shield_discipline );
       }
     }
+    else if ( current_value > 0 )
+    {
+      priest().trigger_unfolding_vision( player, current_value, false );  // wowhub
+    }
 
     ab::expire_override( expiration_stacks, remaining_duration );
   }
@@ -120,6 +124,10 @@ struct void_shield_buff_t : public priest_buff_t<absorb_buff_t>
       {
         priest().resource_gain( RESOURCE_MANA, energize_amount, priest().gains.shield_discipline );
       }
+    }
+    else if ( current_value > 0 )
+    {
+      priest().trigger_unfolding_vision( player, current_value, true );  // wowhub
     }
 
     ab::expire_override( expiration_stacks, remaining_duration );
@@ -2009,6 +2017,11 @@ struct power_word_shield_t final : public priest_absorb_t
       priest_td_t& td = get_td( s->target );
       td.buffs.atonement->trigger( atonement_duration );
     }
+
+    // wowhub: Assured Safety puts Prayer of Mending stacks on the shielded ally
+    if ( priest().talents.oracle.assured_safety.enabled() )
+      priest().trigger_prayer_of_mending( s->target,
+                                          as<int>( priest().talents.oracle.assured_safety->effectN( 1 ).base_value() ) );
   }
 };
 
@@ -2201,6 +2214,11 @@ struct void_shield_t final : public priest_absorb_t
       priest_td_t& td = get_td( s->target );
       td.buffs.atonement->trigger( atonement_duration );
     }
+
+    // wowhub: Assured Safety puts Prayer of Mending stacks on the main target, as with Power Word: Shield
+    if ( s->chain_target == 0 && priest().talents.oracle.assured_safety.enabled() )
+      priest().trigger_prayer_of_mending( s->target,
+                                          as<int>( priest().talents.oracle.assured_safety->effectN( 1 ).base_value() ) );
   }
 };
 
@@ -2222,6 +2240,7 @@ struct atonement_t final : public priest_heal_t
     background                                  = true;
     disc_mastery                                = true;
     divine_aegis                                = false;
+    atonement_heal                              = true;
 
     reduced_aoe_targets = p.talents.discipline.atonement->effectN( 2 ).base_value();
   }
@@ -2380,7 +2399,8 @@ struct divine_aegis_t final : public priest_absorb_t
       target_specific[ s->target ] = create_buff( s );
     }
 
-    s->result_amount *= divine_aegis_mult;
+    // wowhub: logs show 30% x (1 + versatility) of the raw heal
+    s->result_amount *= divine_aegis_mult * ( 1.0 + p().cache.heal_versatility() );
 
     if ( result_is_hit( s->result ) )
     {
@@ -2393,7 +2413,79 @@ struct divine_aegis_t final : public priest_absorb_t
                       s->result_total, s->result );
     }
 
-    stats->add_result( 0.0, s->result_total, result_amount_type::ABSORB, s->result, s->block_result, s->target );
+    stats->add_result( 0.0, s->result_amount, result_amount_type::ABSORB, s->result, s->block_result, s->target );
+  }
+};
+
+// ==========================================================================
+// wowhub: Piety (Oracle) - a share of overhealing goes to up to 4 injured allies, split evenly
+// ==========================================================================
+struct piety_t final : public priest_heal_t
+{
+  double share;
+  int max_targets;
+
+  piety_t( priest_t& p )
+    : priest_heal_t( "piety", p, p.find_spell( 443126 ) ),
+      share( p.talents.oracle.piety->effectN( 1 ).percent() ),
+      max_targets( std::max( 1, as<int>( p.talents.oracle.piety->effectN( 2 ).base_value() ) ) )
+  {
+    background = proc = true;
+    may_crit = callbacks = false;
+    divine_aegis = piety_source = false;
+    auto_target  = false;
+  }
+
+  void init() override
+  {
+    priest_heal_t::init();
+    snapshot_flags = update_flags = 0;  // Ignore Caster Modifiers
+  }
+
+  void redistribute( double pool )
+  {
+    std::vector<player_t*> injured;
+    for ( auto* t : sim->healing_no_pet_list )
+      if ( !t->is_sleeping() && t->resources.pct( RESOURCE_HEALTH ) < 1.0 )
+        injured.push_back( t );
+    if ( injured.empty() )
+      return;
+    size_t n = std::min( injured.size(), as<size_t>( max_targets ) );
+    std::partial_sort( injured.begin(), injured.begin() + n, injured.end(), []( player_t* a, player_t* b ) {
+      return a->resources.pct( RESOURCE_HEALTH ) < b->resources.pct( RESOURCE_HEALTH );
+    } );
+    for ( size_t i = 0; i < n; i++ )
+      execute_on_target( injured[ i ], pool * share / n );
+  }
+};
+
+// ==========================================================================
+// wowhub: Prayer of Mending - the ward heals on the next hit, then jumps with one stack less
+// ==========================================================================
+struct prayer_of_mending_t final : public priest_heal_t
+{
+  prayer_of_mending_t( priest_t& p ) : priest_heal_t( "prayer_of_mending", p, p.find_spell( 33110 ) )
+  {
+    background = proc = true;
+    disc_mastery = true;
+    auto_target  = false;
+  }
+};
+
+// wowhub: Unfolding Vision - a shield that expires unused jumps once to a nearby injured ally
+struct unfolding_vision_t final : public priest_absorb_t
+{
+  unfolding_vision_t( priest_t& p, util::string_view n, unsigned id ) : priest_absorb_t( n, p, p.find_spell( id ) )
+  {
+    background = proc = true;
+    may_crit = callbacks = false;
+    harmful = false;
+  }
+
+  void init() override
+  {
+    priest_absorb_t::init();
+    snapshot_flags = update_flags = 0;  // carries what was left of the old shield
   }
 };
 }  // namespace heals
@@ -2531,6 +2623,8 @@ priest_td_t::priest_td_t( player_t* target, priest_t& p ) : actor_target_data_t(
                         } );
 
   buffs.horrific_visions = make_buff( *this, "horrific_visions", p.talents.shadow.horrific_visions );
+
+  buffs.prayer_of_mending = make_buff( *this, "prayer_of_mending", p.find_spell( 41635 ) );
 }
 
 void priest_td_t::reset()
@@ -3665,6 +3759,23 @@ void priest_t::init_background_actions()
   {
     background_actions.divine_aegis = new actions::heals::divine_aegis_t( *this );
   }
+  // wowhub healing sims
+  if ( talents.oracle.piety.enabled() )
+  {
+    background_actions.piety = new actions::heals::piety_t( *this );
+  }
+  if ( talents.oracle.assured_safety.enabled() )
+  {
+    background_actions.prayer_of_mending = new actions::heals::prayer_of_mending_t( *this );
+    sim->heal_hurt_callbacks.push_back( [ this ]( player_t* t ) { prayer_of_mending_hurt( t ); } );
+  }
+  if ( talents.oracle.unfolding_vision.enabled() && specialization() == PRIEST_DISCIPLINE )
+  {
+    background_actions.unfolding_vision_shield =
+        new actions::heals::unfolding_vision_t( *this, "power_word_shield_unfolding_vision", 1300008 );
+    background_actions.unfolding_vision_void_shield =
+        new actions::heals::unfolding_vision_t( *this, "void_shield_unfolding_vision", 1300009 );
+  }
 
   background_actions.shadow_word_death->background = true;
   background_actions.shadow_word_death->dual       = true;
@@ -3681,7 +3792,8 @@ bool priest_t::validate_actor()
   {
     case PRIEST_HOLY:
     case PRIEST_DISCIPLINE:
-      if ( !sim->allow_experimental_specializations )
+      // wowhub: healing sims (role=heal with healing targets) are supported
+      if ( !sim->allow_experimental_specializations && !( primary_role() == ROLE_HEAL && sim->heal_target ) )
       {
         if ( !quiet )
           sim->error( "Healing Priest specializations for {} are not currently supported.", *this );
@@ -3805,7 +3917,8 @@ priest_td_t* priest_t::get_target_data( player_t* target ) const
 void priest_t::init_action_list()
 {
   // 2020-12-31: Healing is outdated and not supported (both discipline and holy)
-  if ( !sim->allow_experimental_specializations && primary_role() == ROLE_HEAL )
+  if ( !sim->allow_experimental_specializations && primary_role() == ROLE_HEAL &&
+       !( specialization() == PRIEST_DISCIPLINE && sim->heal_target ) )
   {
     if ( !quiet )
       sim->error( "Role heal for priest '{}' is currently not supported.", name() );
@@ -3834,7 +3947,10 @@ void priest_t::init_action_list()
       }
       break;
     case PRIEST_DISCIPLINE:
-      priest_apl::discipline( this );
+      if ( primary_role() == ROLE_HEAL && sim->heal_target )
+        apl_discipline_heal();
+      else
+        priest_apl::discipline( this );
       break;
     case PRIEST_HOLY:
       priest_apl::holy( this );
@@ -4132,6 +4248,8 @@ void priest_t::reset()
 {
   base_t::reset();
 
+  piety_pool = 0;  // wowhub
+
   // Reset Target Data
   for ( player_t* target : sim->target_list )
   {
@@ -4257,7 +4375,74 @@ void priest_t::trigger_atonement( action_state_t* s, double mul )
 // Trigger Divine Aegis
 void priest_t::trigger_divine_aegis( action_state_t* s )
 {
-  background_actions.divine_aegis->execute_on_target( s->target, s->result_amount );
+  background_actions.divine_aegis->execute_on_target( s->target, s->result_total );
+}
+
+// wowhub: overhealing is pooled and handed out on a half-second beat, as in logs
+void priest_t::trigger_piety( double overheal )
+{
+  if ( !background_actions.piety || overheal <= 0 )
+    return;
+  if ( piety_pool <= 0 )
+    make_event( *sim, timespan_t::from_seconds( 0.5 - std::fmod( sim->current_time().total_seconds(), 0.5 ) ), [ this ] {
+      double pool = piety_pool;
+      piety_pool  = 0;
+      background_actions.piety->redistribute( pool );
+    } );
+  piety_pool += overheal;
+}
+
+void priest_t::trigger_prayer_of_mending( player_t* target, int stacks )
+{
+  if ( !background_actions.prayer_of_mending || !target || stacks <= 0 )
+    return;
+  auto* b = get_target_data( target )->buffs.prayer_of_mending;
+  b->expire();
+  b->trigger( stacks );
+}
+
+// a hit on someone with the ward: heal them, then the remaining stacks jump to another injured ally
+void priest_t::prayer_of_mending_hurt( player_t* target )
+{
+  auto* td = find_target_data( target );
+  if ( !td || !td->buffs.prayer_of_mending || !td->buffs.prayer_of_mending->check() )
+    return;
+  int left = td->buffs.prayer_of_mending->check() - 1;
+  td->buffs.prayer_of_mending->expire();
+  background_actions.prayer_of_mending->execute_on_target( target );
+  if ( left <= 0 )
+    return;
+  std::vector<player_t*> next;
+  for ( auto* t : sim->healing_no_pet_list )
+  {
+    if ( t == target || t->is_sleeping() )
+      continue;
+    auto* ttd = find_target_data( t );
+    if ( ttd && ttd->buffs.prayer_of_mending && ttd->buffs.prayer_of_mending->check() )
+      continue;
+    next.push_back( t );
+  }
+  if ( next.empty() )
+    return;
+  player_t* to = next[ rng().range( next.size() ) ];
+  make_event( *sim, 300_ms, [ this, to, left ] { trigger_prayer_of_mending( to, left ); } );
+}
+
+void priest_t::trigger_unfolding_vision( player_t* from, double amount, bool void_shield )
+{
+  action_t* a = void_shield ? background_actions.unfolding_vision_void_shield : background_actions.unfolding_vision_shield;
+  if ( !a || amount <= 0 )
+    return;
+  player_t* best = nullptr;
+  for ( auto* t : sim->healing_no_pet_list )
+  {
+    if ( t == from || t->is_sleeping() || t->resources.pct( RESOURCE_HEALTH ) >= 1.0 )
+      continue;
+    if ( !best || t->resources.pct( RESOURCE_HEALTH ) < best->resources.pct( RESOURCE_HEALTH ) )
+      best = t;
+  }
+  if ( best )
+    a->execute_on_target( best, amount );
 }
 
 void priest_t::spawn_idol_of_cthun( action_state_t* s )

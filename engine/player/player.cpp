@@ -464,6 +464,7 @@ struct leech_t : public heal_t
     background = proc = true;
     callbacks = may_crit = may_miss = may_dodge = may_parry = may_block = false;
     target = player;
+    auto_target = false;  // wowhub: Leech only ever heals its owner
   }
 
   void init() override

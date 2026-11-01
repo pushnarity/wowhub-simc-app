@@ -79,6 +79,8 @@ namespace actions::heals
 {
 struct atonement_t;
 struct divine_aegis_t;
+struct piety_t;
+struct prayer_of_mending_t;
 struct crystalline_reflection_heal_t;
 struct crystalline_reflection_damage_t;
 struct echo_of_light_t;
@@ -108,6 +110,7 @@ public:
     propagate_const<buff_t*> death_and_madness_debuff;
     buff_t* atonement;
     propagate_const<buff_t*> horrific_visions;
+    buff_t* prayer_of_mending;  // wowhub: the ward that heals on the next hit
   } buffs;
 
   priest_t& priest()
@@ -826,6 +829,11 @@ public:
     propagate_const<actions::spells::burning_vehemence_t*> burning_vehemence;
     propagate_const<actions::heals::atonement_t*> atonement;
     propagate_const<actions::heals::divine_aegis_t*> divine_aegis;
+    // wowhub healing sims
+    propagate_const<actions::heals::piety_t*> piety;
+    propagate_const<actions::heals::prayer_of_mending_t*> prayer_of_mending;
+    propagate_const<action_t*> unfolding_vision_shield;
+    propagate_const<action_t*> unfolding_vision_void_shield;
     propagate_const<actions::spells::entropic_rift_damage_t*> entropic_rift_damage;
     propagate_const<actions::spells::entropic_rift_t*> entropic_rift;
     propagate_const<actions::spells::collapsing_void_damage_t*> collapsing_void;
@@ -848,6 +856,7 @@ public:
 
   // Player Data State
   vector_with_callback<player_t*> allies_with_atonement;
+  double piety_pool = 0;  // wowhub: overhealing waiting to be redistributed this instant
   struct state_t
   {
     player_t* last_entropic_rift_target;
@@ -1023,6 +1032,12 @@ public:
   void trigger_idol_of_cthun( action_state_t* );
   void trigger_atonement( action_state_t*, double );
   void trigger_divine_aegis( action_state_t* );
+  // wowhub healing sims
+  void trigger_piety( double overheal );
+  void trigger_prayer_of_mending( player_t* target, int stacks );
+  void prayer_of_mending_hurt( player_t* target );
+  void trigger_unfolding_vision( player_t* from, double amount, bool void_shield );
+  void apl_discipline_heal();
   void spawn_idol_of_cthun( action_state_t* );
   void trigger_shadowy_apparitions( proc_t* proc, player_t* target, double apparition_damage_mod = 1.0 );
   void trigger_psychic_link( action_state_t* );
@@ -1407,9 +1422,12 @@ struct priest_heal_t : public priest_action_t<heal_t>
   bool disc_mastery;
   bool holy_mastery;
   bool divine_aegis;
+  bool piety_source;    // wowhub: overhealing feeds Piety
+  bool atonement_heal;  // wowhub: Atonement feeds Piety only when it crits
 
   priest_heal_t( util::string_view name, priest_t& player, const spell_data_t* s = spell_data_t::nil() )
-    : base_t( name, player, s ), disc_mastery( false ), holy_mastery( false ), divine_aegis( true )
+    : base_t( name, player, s ), disc_mastery( false ), holy_mastery( false ), divine_aegis( true ),
+      piety_source( true ), atonement_heal( false )
   {
     target = &player;
   }
@@ -1476,6 +1494,19 @@ struct priest_heal_t : public priest_action_t<heal_t>
       }
     }
 
+    // wowhub: Divine Aegis takes the whole critical heal, overhealing included (Warcraft Logs: 32.4% of raw)
+    if ( s->result == RESULT_CRIT && s->result_total > 0 && divine_aegis && p().talents.discipline.divine_aegis.enabled() )
+    {
+      p().trigger_divine_aegis( s );
+    }
+
+    // wowhub: Piety; plain Atonement overhealing does not count in logs, critical Atonement does
+    if ( s->result_total > s->result_amount && p().talents.oracle.piety.enabled() && piety_source &&
+         ( !atonement_heal || s->result == RESULT_CRIT ) )
+    {
+      p().trigger_piety( s->result_total - s->result_amount );
+    }
+
     if ( s->result_amount > 0 )
     {
       // TODO: Use proper base_value() from talent struct when fixed
@@ -1485,10 +1516,6 @@ struct priest_heal_t : public priest_action_t<heal_t>
         priest().buffs.twist_of_fate->trigger();
       }
 
-      if ( s->result == RESULT_CRIT && divine_aegis && p().talents.discipline.divine_aegis.enabled() )
-      {
-        p().trigger_divine_aegis( s );
-      }
     }
   }
 

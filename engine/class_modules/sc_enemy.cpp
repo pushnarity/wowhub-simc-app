@@ -1131,8 +1131,10 @@ struct heal_replay_t
 {
   struct target_t { double max_health = 0; bool tank = false; };
   struct event_t { double t; int slot; double damage; double heal; };
+  struct mana_t { double t; double amount; };  // mana other players gave the healer
   std::vector<target_t> targets;
   std::vector<event_t> events;
+  std::vector<mana_t> mana;
 
   static const heal_replay_t* get( const std::string& path )
   {
@@ -1161,6 +1163,12 @@ struct heal_replay_t
           event_t e;
           in >> e.t >> e.slot >> e.damage >> e.heal;
           slot->events.push_back( e );
+        }
+        else if ( kind == "m" )
+        {
+          mana_t m;
+          in >> m.t >> m.amount;
+          slot->mana.push_back( m );
         }
         else
           std::getline( in, kind );  // comment or unknown line
@@ -1273,6 +1281,8 @@ struct heal_enemy_t : public enemy_t
       if ( amount > 0 && b->check() )
         amount -= b->consume( amount );
     resources.current[ RESOURCE_HEALTH ] = std::max( 1.0, resources.current[ RESOURCE_HEALTH ] - amount );
+    for ( auto& cb : sim->heal_hurt_callbacks )
+      cb( this );
   }
 
   // absolute damage from a replayed fight, shields first
@@ -1282,6 +1292,8 @@ struct heal_enemy_t : public enemy_t
       if ( amount > 0 && b->check() )
         amount -= b->consume( amount );
     resources.current[ RESOURCE_HEALTH ] = std::max( 1.0, resources.current[ RESOURCE_HEALTH ] - amount );
+    for ( auto& cb : sim->heal_hurt_callbacks )
+      cb( this );
   }
 
   void combat_begin() override
@@ -1301,8 +1313,40 @@ struct heal_enemy_t : public enemy_t
       tank = rp->targets[ slot ].tank;
       resources.base[ RESOURCE_HEALTH ] = resources.max[ RESOURCE_HEALTH ] = rp->targets[ slot ].max_health;
       resources.current[ RESOURCE_HEALTH ] = resources.max[ RESOURCE_HEALTH ];
+      // the director also replays the hits the simmed healer took and the heals others gave them
+      player_t* healer = nullptr;
+      if ( slot == 0 )
+        for ( auto* p : sim->player_no_pet_list )
+          if ( !p->is_enemy() && p->type != HEALING_ENEMY )
+          {
+            healer = p;
+            break;
+          }
+      if ( healer )
+      {
+        gain_t* g = healer->get_gain( "external_mana" );
+        for ( const auto& m : rp->mana )
+          make_event( *sim, timespan_t::from_seconds( m.t ),
+                      [ healer, g, m ] { healer->resource_gain( RESOURCE_MANA, m.amount, g ); } );
+      }
       for ( const auto& e : rp->events )
       {
+        if ( e.slot == -1 && healer )
+        {
+          make_event( *sim, timespan_t::from_seconds( e.t ), [ this, healer, e ] {
+            double amount = e.damage;
+            for ( auto* b : healer->absorb_buff_list )
+              if ( amount > 0 && b->check() )
+                amount -= b->consume( amount );
+            healer->resources.current[ RESOURCE_HEALTH ] =
+              std::clamp( healer->resources.current[ RESOURCE_HEALTH ] - amount + e.heal, 1.0,
+                          healer->resources.max[ RESOURCE_HEALTH ] );
+            if ( e.damage > 0 )
+              for ( auto& cb : sim->heal_hurt_callbacks )
+                cb( healer );
+          } );
+          continue;
+        }
         if ( e.slot != slot )
           continue;
         make_event( *sim, timespan_t::from_seconds( e.t ), [ this, e ] {
