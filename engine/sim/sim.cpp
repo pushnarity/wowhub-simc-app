@@ -4009,6 +4009,7 @@ void sim_t::create_options()
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );
   add_option( opt_string( "heal_damage_profile", heal_damage_profile ) );
+  add_option( opt_string( "heal_replay", heal_replay ) );
   add_option( opt_float( "heal_damage_scale", heal_damage_scale, 0.0, 10.0 ) );
   add_option( opt_float( "dhaps_healing_weight", dhaps_healing_weight ) );
   add_option( opt_float( "scaling_normalized", scaling_normalized ) );

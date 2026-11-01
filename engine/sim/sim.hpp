@@ -582,6 +582,7 @@ struct sim_t : private sc_thread_t
   bool enable_dps_healing;
   bool count_overheal_as_heal;
   std::string heal_damage_profile;
+  std::string heal_replay;  // file with a real fight's hits and other healers' heals per target
   double heal_damage_scale;
   double dhaps_healing_weight;
   double scaling_normalized;

@@ -6213,6 +6213,10 @@ struct efflorescence_t final : public druid_heal_t
 
   bool ready() override
   {
+    // with Lifetreading it grows under the Lifebloom target by itself; players never cast it
+    if ( !background && p()->active.efflorescence_auto )
+      return false;
+
     if ( p()->efflo_expires > sim->current_time() )
       return false;
 
@@ -7425,7 +7429,7 @@ public:
 
     // Master Shapeshifter: casting damage spells as Restoration returns mana
     if ( p()->specialization() == DRUID_RESTORATION && p()->talent.master_shapeshifter.ok() && !background )
-      p()->resource_gain( RESOURCE_MANA, p()->find_spell( 411146 )->effectN( 1 ).resource( RESOURCE_MANA ),
+      p()->resource_gain( RESOURCE_MANA, p()->find_spell( 411146 )->effectN( 1 ).average( p() ),
                           p()->get_gain( "Master Shapeshifter" ) );
 
     if ( dreamstate || !has_flag( flag_e::FOREGROUND ) )

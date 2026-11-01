@@ -7,6 +7,10 @@
 
 #include "simulationcraft.hpp"
 
+#include <fstream>
+#include <map>
+#include <mutex>
+
 // ==========================================================================
 // Enemy
 // ==========================================================================
@@ -1120,6 +1124,52 @@ struct add_t : public pet_t
 // Heal Enemy
 // ==========================================================================
 
+// A real fight read from a file (heal_replay=path), for testing a healer against a log:
+//   target <slot> <max health> <tank 0|1>
+//   e <seconds> <slot> <damage taken> <healing from other healers>
+struct heal_replay_t
+{
+  struct target_t { double max_health = 0; bool tank = false; };
+  struct event_t { double t; int slot; double damage; double heal; };
+  std::vector<target_t> targets;
+  std::vector<event_t> events;
+
+  static const heal_replay_t* get( const std::string& path )
+  {
+    static std::mutex m;
+    static std::map<std::string, std::unique_ptr<heal_replay_t>> cache;
+    std::lock_guard<std::mutex> lock( m );
+    auto& slot = cache[ path ];
+    if ( !slot )
+    {
+      slot = std::make_unique<heal_replay_t>();
+      std::ifstream in( path );
+      std::string kind;
+      while ( in >> kind )
+      {
+        if ( kind == "target" )
+        {
+          int i; target_t t; int tank;
+          in >> i >> t.max_health >> tank;
+          t.tank = tank != 0;
+          if ( i >= as<int>( slot->targets.size() ) )
+            slot->targets.resize( i + 1 );
+          slot->targets[ i ] = t;
+        }
+        else if ( kind == "e" )
+        {
+          event_t e;
+          in >> e.t >> e.slot >> e.damage >> e.heal;
+          slot->events.push_back( e );
+        }
+        else
+          std::getline( in, kind );  // comment or unknown line
+      }
+    }
+    return slot.get();
+  }
+};
+
 struct heal_enemy_t : public enemy_t
 {
   // Incoming damage for healing sims, in shares of the target's maximum health, so a fight looks
@@ -1225,9 +1275,46 @@ struct heal_enemy_t : public enemy_t
     resources.current[ RESOURCE_HEALTH ] = std::max( 1.0, resources.current[ RESOURCE_HEALTH ] - amount );
   }
 
+  // absolute damage from a replayed fight, shields first
+  void hurt_amount( double amount )
+  {
+    for ( auto* b : absorb_buff_list )
+      if ( amount > 0 && b->check() )
+        amount -= b->consume( amount );
+    resources.current[ RESOURCE_HEALTH ] = std::max( 1.0, resources.current[ RESOURCE_HEALTH ] - amount );
+  }
+
   void combat_begin() override
   {
     enemy_t::combat_begin();
+
+    if ( !sim->heal_replay.empty() )
+    {
+      auto rp = heal_replay_t::get( sim->heal_replay );
+      auto list = targets();
+      int slot = -1;
+      for ( size_t i = 0; i < list.size(); i++ )
+        if ( list[ i ] == this )
+          slot = as<int>( i );
+      if ( slot < 0 || slot >= as<int>( rp->targets.size() ) || rp->targets[ slot ].max_health <= 0 )
+        return;
+      tank = rp->targets[ slot ].tank;
+      resources.base[ RESOURCE_HEALTH ] = resources.max[ RESOURCE_HEALTH ] = rp->targets[ slot ].max_health;
+      resources.current[ RESOURCE_HEALTH ] = resources.max[ RESOURCE_HEALTH ];
+      for ( const auto& e : rp->events )
+      {
+        if ( e.slot != slot )
+          continue;
+        make_event( *sim, timespan_t::from_seconds( e.t ), [ this, e ] {
+          if ( e.damage > 0 )
+            hurt_amount( e.damage );
+          if ( e.heal > 0 )
+            resources.current[ RESOURCE_HEALTH ] =
+              std::min( resources.max[ RESOURCE_HEALTH ], resources.current[ RESOURCE_HEALTH ] + e.heal );
+        } );
+      }
+      return;
+    }
 
     const profile_t* pr = profile( profile_name() );
     sim->print_log( "{} healing profile '{}'", *this, pr ? profile_name() : "none" );
