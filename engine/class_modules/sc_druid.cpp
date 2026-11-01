@@ -545,6 +545,7 @@ struct druid_t final : public parse_player_effects_t
   timespan_t efflo_expires;      // Efflorescence is limited to one at a time
   player_t* lifebloom_target;
   timespan_t lifebloom_applied;  // Everbloom stacks grow from this moment
+  int reforestation_count;
 
   struct dot_list_t
   {
@@ -655,6 +656,8 @@ struct druid_t final : public parse_player_effects_t
     action_t* verdancy;
     action_t* symbiotic_blooms;
     action_t* bursting_growth_heal;
+    action_t* dream_of_cenarius;
+    action_t* natures_bounty;
 
     // Hero talents
     action_t* bloodseeker_vines;
@@ -821,6 +824,7 @@ struct druid_t final : public parse_player_effects_t
     buff_t* natures_swiftness;
     buff_t* oath_of_the_elder_druid;
     buff_t* soul_of_the_forest_tree;
+    buff_t* genesis;  // mid2 resto 2pc/4pc
     buff_t* yseras_gift;
 
     // Hero talents
@@ -6479,6 +6483,9 @@ struct natures_swiftness_t final : public trigger_control_of_the_dream_t<druid_h
     base_t::execute();
 
     p()->buff.natures_swiftness->trigger();
+
+    if ( p()->sets->has_set_bonus( DRUID_RESTORATION, MID2, B4 ) )
+      p()->buff.genesis->trigger();
   }
 
   bool ready() override
@@ -6572,6 +6579,24 @@ struct regrowth_t final : public trigger_thriving_growth_t<use_dot_list_t<druid_
       tcc += bonus_crit;
 
     return tcc;
+  }
+
+  void impact( action_state_t* s ) override
+  {
+    base_t::impact( s );
+
+    if ( is_direct && !background && p()->active.natures_bounty && s->result_total > 0 )
+    {
+      std::vector<player_t*> pool;
+      for ( auto* t : sim->healing_no_pet_list )
+        if ( t != s->target && !t->is_sleeping() && td( t )->hots.rejuvenation->is_ticking() )
+          pool.push_back( t );
+      range::sort( pool, []( player_t* a, player_t* b ) { return a->health_percentage() < b->health_percentage(); } );
+      size_t n = as<size_t>( p()->talent.natures_bounty->effectN( 2 ).base_value() );
+      double share = s->result_total * p()->talent.natures_bounty->effectN( 1 ).percent();
+      for ( size_t i = 0; i < n && i < pool.size(); i++ )
+        static_cast<druid_share_heal_t*>( p()->active.natures_bounty )->heal_share( pool[ i ], share );
+    }
   }
 
   double composite_target_multiplier( player_t* t ) const override
@@ -6701,12 +6726,37 @@ struct rejuvenation_base_t : public druid_heal_t
     return pm;
   }
 
+  std::unordered_map<const dot_t*, timespan_t> dormancy;
+
   void tick( dot_t* d ) override
   {
+    bool full = d->target->health_percentage() >= 100.0;
+
     druid_heal_t::tick( d );
 
     if ( cult_hot && d->target->health_percentage() <= cult_pct )
       cult_hot->execute_on_target( d->target );
+
+    // Nurturing Dormancy: healing a full health target lengthens the HoT
+    if ( full && p()->talent.nurturing_dormancy.ok() )
+    {
+      auto add = timespan_t::from_seconds( p()->talent.nurturing_dormancy->effectN( 1 ).base_value() );
+      auto max = timespan_t::from_seconds( p()->talent.nurturing_dormancy->effectN( 2 ).base_value() );
+      auto& done = dormancy[ d ];
+      if ( done < max )
+      {
+        auto step = std::min( add, max - done );
+        d->adjust_duration( step );
+        done += step;
+      }
+    }
+  }
+
+  void trigger_dot( action_state_t* s ) override
+  {
+    druid_heal_t::trigger_dot( s );
+    if ( auto d = find_dot( s->target ) )
+      dormancy[ d ] = 0_ms;
   }
 
   void impact( action_state_t* s ) override
@@ -6761,6 +6811,10 @@ struct rejuvenation_t final : public rejuvenation_base_t
 
     if ( archdruid && p()->active.archdruid_rejuvenation )
       p()->spread_archdruid( p()->active.archdruid_rejuvenation, target );
+
+    if ( !background && p()->sets->has_set_bonus( DRUID_RESTORATION, MID2, B2 ) &&
+         rng().roll( p()->sets->set( DRUID_RESTORATION, MID2, B2 )->effectN( 1 ).percent() ) )
+      p()->buff.genesis->trigger();
 
     if ( !background )
       p()->buff.soul_of_the_forest_tree->expire();
@@ -6837,6 +6891,17 @@ struct swiftmend_t final : public druid_heal_t
 
     p()->on_swiftmend_or_wild_growth( target );
 
+    if ( p()->talent.reforestation.ok() &&
+         ++p()->reforestation_count >= p()->talent.reforestation->effectN( 1 ).base_value() )
+    {
+      p()->reforestation_count = 0;
+      auto dur = timespan_t::from_seconds( p()->talent.reforestation->effectN( 2 ).base_value() );
+      if ( p()->buff.incarnation_tree->check() )
+        p()->buff.incarnation_tree->extend_duration( dur );
+      else
+        p()->buff.incarnation_tree->trigger( dur );
+    }
+
     // Everbloom: Lifebloom bursts into a Blooming Frenzy
     for ( const auto& t : { p()->talent.everbloom_1, p()->talent.everbloom_2, p()->talent.everbloom_3 } )
     {
@@ -6890,6 +6955,31 @@ struct tranquility_t final : public druid_heal_t
     replace_stats( this, tick_action );
   }
 
+  void execute() override
+  {
+    druid_heal_t::execute();
+
+    if ( p()->sets->has_set_bonus( DRUID_RESTORATION, MID2, B4 ) )
+      p()->buff.genesis->trigger();
+  }
+
+  void tick( dot_t* d ) override
+  {
+    druid_heal_t::tick( d );
+
+    if ( p()->talent.flourish.ok() && p()->talent.flourish->id() == 197721 )
+    {
+      auto add = timespan_t::from_seconds( p()->talent.flourish->effectN( 1 ).base_value() );
+      for ( auto* t : sim->healing_no_pet_list )
+      {
+        auto h = get_td( t )->hots;
+        for ( auto* dot : { h.rejuvenation, h.germination, h.regrowth, h.wild_growth, h.lifebloom, h.cultivation } )
+          if ( dot && dot->is_ticking() )
+            dot->adjust_duration( add );
+      }
+    }
+  }
+
   void init() override
   {
     druid_heal_t::init();
@@ -6912,7 +7002,7 @@ struct wild_growth_t final : public trigger_thriving_growth_t<use_dot_list_t<dru
 
   DRUID_ABILITY( wild_growth_t, base_t, "wild_growth", p->talent.wild_growth ),
     decay_coeff( 0.07 * ( 1.0 - p->talent.unstoppable_growth->effectN( 1 ).percent() ) ),
-    inc_mod( as<int>( p->talent.incarnation_tree->effectN( 3 ).base_value() ) )
+    inc_mod( as<int>( p->find_spell( 33891 )->effectN( 3 ).base_value() ) )  // also granted by Reforestation
   {
     aoe = as<int>( data().effectN( 2 ).base_value() + p->talent.improved_wild_growth->effectN( 1 ).base_value() );
 
@@ -7205,7 +7295,8 @@ public:
     parse_effects( p->buff.dreamstate, effect_mask_t( false ).enable( 3 ) );
     parse_effects( &p->buff.dreamstate->data(), effect_mask_t( true ).disable( 3 ), [ this ] { return dreamstate; } );
 
-    base_costs[ RESOURCE_MANA ] = 0.0;  // remove mana cost so we don't need to enable mana regen
+    if ( p->specialization() != DRUID_RESTORATION )
+      base_costs[ RESOURCE_MANA ] = 0.0;  // remove mana cost so we don't need to enable mana regen
 
     form_mask = CASTER_FORM | MOONKIN_FORM;
 
@@ -7311,6 +7402,11 @@ public:
 
     umbral_embrace_trigger( this );
 
+    // Master Shapeshifter: casting damage spells as Restoration returns mana
+    if ( p()->specialization() == DRUID_RESTORATION && p()->talent.master_shapeshifter.ok() && !background )
+      p()->resource_gain( RESOURCE_MANA, p()->find_spell( 411146 )->effectN( 1 ).resource( RESOURCE_MANA ),
+                          p()->get_gain( "Master Shapeshifter" ) );
+
     if ( dreamstate || !has_flag( flag_e::FOREGROUND ) )
       p()->buff.dreamstate->consume( this );
 
@@ -7327,6 +7423,16 @@ public:
 
     if ( cast_state( s )->dream_burst )
       p()->active.dream_burst->execute_on_target( s->target );
+
+    // Dream of Cenarius: Wrath turns its damage into healing on an injured ally, Starfire half of it
+    if ( p()->active.dream_of_cenarius && s->result_amount > 0 )
+    {
+      const auto& doc = p()->talent.dream_of_cenarius_tree;
+      double pct = id == 5176 || id == 190984 ? doc->effectN( 1 ).percent() : doc->effectN( 2 ).percent();
+      auto heal = static_cast<heal_t*>( p()->active.dream_of_cenarius );
+      if ( auto t = heal->pick_target() )
+        static_cast<heals::druid_share_heal_t*>( heal )->heal_share( t, s->result_amount * pct );
+    }
   }
 
   void record_data( action_state_t* s ) override
@@ -11327,6 +11433,26 @@ void druid_t::create_buffs()
     ->add_invalidate( CACHE_ARMOR );
 
   buff.innervate = make_fallback( talent.innervate.ok(), this, "innervate", talent.innervate );
+  if ( talent.innervate.ok() )
+  {
+    // regenerates a share of maximum mana each tick
+    const auto& eff = talent.innervate->effectN( 1 );
+    auto gain = get_gain( "Innervate" );
+    buff.innervate->set_period( eff.period() > 0_ms ? eff.period() : 1_s )
+      ->set_tick_callback( [ this, gain, pct = eff.percent() ]( buff_t*, int, timespan_t ) {
+        resource_gain( RESOURCE_MANA, resources.max[ RESOURCE_MANA ] * pct, gain );
+      } );
+  }
+
+  buff.genesis = make_fallback( sets->has_set_bonus( DRUID_RESTORATION, MID2, B2 ), this, "genesis", find_spell( 1302255 ) );
+  if ( sets->has_set_bonus( DRUID_RESTORATION, MID2, B2 ) )
+  {
+    // every application runs on its own timer
+    buff.genesis->set_stack_behavior( buff_stack_behavior::ASYNCHRONOUS )->set_max_stack( 20 );
+    if ( sets->has_set_bonus( DRUID_RESTORATION, MID2, B4 ) )
+      buff.genesis->set_duration( buff.genesis->data().duration() +
+                                  sets->set( DRUID_RESTORATION, MID2, B4 )->effectN( 1 ).time_value() );
+  }
 
   buff.lycaras_teachings_haste =
     make_fallback( talent.lycaras_teachings.ok(), this, "lycaras_teachings_haste", find_spell( 378989 ) )
@@ -11845,7 +11971,7 @@ void druid_t::create_buffs()
       ->set_name_reporting( "clearcasting" );
 
   buff.incarnation_tree =
-    make_fallback( talent.incarnation_tree.ok(), this, "incarnation_tree_of_life", find_spell( 5420 ) )
+    make_fallback( talent.incarnation_tree.ok() || talent.reforestation.ok(), this, "incarnation_tree_of_life", find_spell( 5420 ) )
       ->set_duration( find_spell( 117679 )->duration() );  // 117679 is the generic incarnation shift proxy spell
 
   buff.natures_swiftness =
@@ -12293,6 +12419,12 @@ void druid_t::create_actions()
 
     if ( talent.verdancy.ok() )
       active.verdancy = get_secondary_action<verdancy_t>( "verdancy" );
+
+    if ( talent.natures_bounty.ok() )
+      active.natures_bounty = get_secondary_action<druid_share_heal_t>( "natures_bounty", find_spell( 1264376 ) );
+
+    if ( talent.dream_of_cenarius_tree.ok() )
+      active.dream_of_cenarius = get_secondary_action<druid_share_heal_t>( "dream_of_cenarius", find_spell( 145153 ) );
 
     if ( talent.thriving_vegetation.ok() )
       active.thriving_vegetation =
@@ -13522,6 +13654,7 @@ void druid_t::reset()
   efflo_expires = 0_ms;
   lifebloom_target = nullptr;
   lifebloom_applied = 0_ms;
+  reforestation_count = 0;
   dot_lists.moonfire.clear();
   dot_lists.sunfire.clear();
   dot_lists.rake.clear();
@@ -14370,6 +14503,10 @@ int druid_td_t::hots_ticking() const
   auto lb_mul = 1 + as<int>( static_cast<druid_t*>( source )->talent.harmonious_blooming->effectN( 1 ).base_value() );
   count += lb_mul * hots.lifebloom->is_ticking();
 
+  // Symbiotic Blooms (Wildstalker) is a Restoration heal over time too
+  if ( auto sb = target->find_dot( "symbiotic_blooms", source ); sb && sb->is_ticking() )
+    count++;
+
   return count;
 }
 
@@ -14733,6 +14870,7 @@ void druid_t::parse_action_effects( action_t* action )
 
   // Restoration
   _a->parse_effects( buff.abundance );
+  _a->parse_effects( buff.genesis );
   _a->parse_effects( buff.call_of_the_elder_druid, effect_mask_t( true ).disable( 10, 11, 12 ) );
   _a->parse_effects( buff.clearcasting_tree );
   _a->parse_effects( buff.incarnation_tree );
