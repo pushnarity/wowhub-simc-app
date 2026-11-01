@@ -1434,6 +1434,7 @@ struct druid_t final : public parse_player_effects_t
   void spread_archdruid( action_t* copy, player_t* first );
   void on_swiftmend_or_wild_growth( player_t* t );
   void summon_grove_guardian();
+  void apl_restoration_heal();
   cooldown_t* grove_guardians_cd = nullptr;
 
 private:
@@ -13485,7 +13486,12 @@ void druid_t::init_action_list()
     case DRUID_BALANCE:     is_ptr() ? druid_apl::apl_balance_ptr( this ) : druid_apl::apl_balance( this );         break;
     case DRUID_FERAL:       is_ptr() ? druid_apl::apl_feral_ptr( this ) : druid_apl::apl_feral( this );             break;
     case DRUID_GUARDIAN:    is_ptr() ? druid_apl::apl_guardian_ptr( this ) : druid_apl::apl_guardian( this );       break;
-    case DRUID_RESTORATION: is_ptr() ? druid_apl::apl_restoration_ptr( this ) : druid_apl::apl_restoration( this ); break;
+    case DRUID_RESTORATION:
+      if ( primary_role() == ROLE_HEAL )
+        apl_restoration_heal();
+      else
+        is_ptr() ? druid_apl::apl_restoration_ptr( this ) : druid_apl::apl_restoration( this );
+      break;
     default:                apl_default(); break;
   }
 
@@ -13651,6 +13657,27 @@ void druid_t::summon_grove_guardian()
     }
   };
   cast_t::next( this, cast, end );
+}
+
+// Healing priority for role=heal, tested against real logs (the upstream Restoration list is for damage)
+void druid_t::apl_restoration_heal()
+{
+  auto def = get_action_priority_list( "default" );
+  def->add_action( "potion,if=time>10" );
+  def->add_action( "use_items" );
+  def->add_action( "innervate,if=mana.pct<70" );
+  def->add_action( "convoke_the_spirits" );
+  def->add_action( "lifebloom,if=!ticking|refreshable" );
+  def->add_action( "natures_swiftness" );
+  def->add_action( "regrowth,if=buff.natures_swiftness.up" );
+  def->add_action( "swiftmend" );
+  def->add_action( "wild_growth" );
+  def->add_action( "efflorescence" );
+  def->add_action( "tranquility,if=time>15" );
+  def->add_action( "rejuvenation,if=active_dot.rejuvenation<8" );
+  def->add_action( "regrowth,if=buff.soul_of_the_forest_tree.up|buff.clearcasting_tree.up" );
+  def->add_action( "rejuvenation,if=mana.pct>30" );
+  def->add_action( "wrath" );
 }
 
 void druid_t::reset()
@@ -14274,6 +14301,7 @@ role_e druid_t::primary_role() const
     case ROLE_TANK:
     case ROLE_ATTACK:
     case ROLE_SPELL:
+    case ROLE_HEAL:  // role=heal picks the healing priority and is measured by healing
       return player_t::primary_role();
       break;
     default:

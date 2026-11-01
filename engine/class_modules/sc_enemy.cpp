@@ -1159,9 +1159,9 @@ struct heal_enemy_t : public enemy_t
   static const profile_t* profile( util::string_view name )
   {
     static const profile_t raid = { 0.010, 2.0, 0.22, 0.32, 15.0, 25.0, 0.15, 0.30, 4.0,
-                                    0.030, 0.050, 1.5, 0.40, 30.0, 40.0, 0.10, 2, 1.125 };
+                                    0.030, 0.050, 1.5, 0.40, 30.0, 40.0, 0.10, 2, 0.84 };
     static const profile_t dungeon = { 0.010, 2.0, 0.18, 0.28, 12.0, 20.0, 0.18, 0.30, 6.0,
-                                       0.040, 0.070, 1.5, 0.35, 20.0, 30.0, 0.03, 1, 1.75 };
+                                       0.040, 0.070, 1.5, 0.35, 20.0, 30.0, 0.03, 1, 1.4 };
     if ( name == "raid" )
       return &raid;
     if ( name == "dungeon" )
