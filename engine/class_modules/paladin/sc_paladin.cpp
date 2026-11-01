@@ -3285,6 +3285,11 @@ void paladin_t::create_actions()
   if ( specialization() == PALADIN_HOLY )
   {
     paladin_t::create_holy_actions();
+    if ( holy_heal_mode() )
+    {
+      init_holy_heal();
+      create_holy_heal_actions();
+    }
   }
   // Prot
   else if ( specialization() == PALADIN_PROTECTION )
@@ -3354,8 +3359,11 @@ void paladin_t::create_actions()
   active.background_cons = new consecration_t( this, "blade_of_justice", BLADE_OF_JUSTICE );
   active.hammer_of_light_cons = new consecration_t( this, "hol", HAMMER_OF_LIGHT );
 
-  active.afterimage    = new word_of_glory_afterimage_t( this );
-  active.guided_prayer = new word_of_glory_guided_prayer_t( this );
+  if ( !holy_heal_mode() )  // wowhub: Eternal Flame replaces Word of Glory there, with its own Afterimage
+  {
+    active.afterimage    = new word_of_glory_afterimage_t( this );
+    active.guided_prayer = new word_of_glory_guided_prayer_t( this );
+  }
 
   player_t::create_actions();
 }
@@ -3371,6 +3379,10 @@ action_t* paladin_t::create_action( util::string_view name, util::string_view op
   action_t* prot_action = create_action_protection( name, options_str );
   if ( prot_action )
     return prot_action;
+
+  if ( holy_heal_mode() )
+    if ( action_t* a = create_action_holy_heal( name, options_str ) )
+      return a;
 
   action_t* holy_action = create_action_holy( name, options_str );
   if ( holy_action )
@@ -3969,7 +3981,9 @@ void paladin_t::init_action_list()
         generate_action_prio_list_prot();  // PROT
         break;
       case PALADIN_HOLY:
-        if ( primary_role() == ROLE_HEAL )
+        if ( holy_heal_mode() )
+          apl_holy_heal();  // wowhub
+        else if ( primary_role() == ROLE_HEAL )
           generate_action_prio_list_holy();  // HOLY
         else
           generate_action_prio_list_holy_dps();
@@ -4073,7 +4087,7 @@ bool paladin_t::validate_fight_style( fight_style_e style ) const
 // paladin_t::validate_actor ================================================
 bool paladin_t::validate_actor()
 {
-  if ( specialization() == PALADIN_HOLY )
+  if ( specialization() == PALADIN_HOLY && !holy_heal_mode() )
   {
     if ( !quiet )
       sim->error( "Holy Paladin for {} is not currently supported.", *this );
@@ -4877,7 +4891,7 @@ double paladin_t::resource_loss( resource_e resource_type, double amount, gain_t
 {
   double result     = player_t::resource_loss( resource_type, amount, source, action );
 
-  if (resource_type == RESOURCE_HEALTH && talents.guided_prayer->ok() && cooldowns.guided_prayer_icd->up() && resources.pct(resource_type) < talents.guided_prayer->effectN(1).percent())
+  if (resource_type == RESOURCE_HEALTH && active.guided_prayer && talents.guided_prayer->ok() && cooldowns.guided_prayer_icd->up() && resources.pct(resource_type) < talents.guided_prayer->effectN(1).percent())
   {
     active.guided_prayer->execute_on_target( this );
     cooldowns.guided_prayer_icd->start();

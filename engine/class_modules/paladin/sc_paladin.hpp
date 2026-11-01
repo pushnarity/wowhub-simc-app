@@ -911,6 +911,14 @@ public:
   void init_spells_holy();
   void create_holy_actions();
   action_t* create_action_holy( util::string_view name, util::string_view options_str );
+  // wowhub healing sims (sc_paladin_holy_heal.cpp)
+  struct hpal_state_t* hpal = nullptr;
+  bool holy_heal_mode() const;
+  void init_holy_heal();
+  void create_holy_heal_actions();
+  action_t* create_action_holy_heal( util::string_view name, util::string_view options_str );
+  void apl_holy_heal();
+  double savior_shield_amount() const;
 
   void apply_action_effects( action_t* a );
   void apply_target_action_effects( action_t* a );
