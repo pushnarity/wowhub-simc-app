@@ -6833,8 +6833,9 @@ struct rejuvenation_t final : public rejuvenation_base_t
       if ( t->is_sleeping() )
         continue;
       auto hots = td( t )->hots;
-      double score = t->resources.pct( RESOURCE_HEALTH ) + rng().real() * 0.001 +
-                     10.0 * ( hots.rejuvenation->is_ticking() + hots.germination->is_ticking() );
+      // a second Rejuvenation (Germination) is worth it on someone clearly more hurt
+      int have = hots.rejuvenation->is_ticking() + hots.germination->is_ticking();
+      double score = t->resources.pct( RESOURCE_HEALTH ) + rng().real() * 0.001 + ( have >= 2 ? 10.0 : 0.15 * have );
       if ( score < best_score )
       {
         best_score = score;
@@ -6944,6 +6945,7 @@ struct tranquility_t final : public druid_heal_t
     {
       background = dual = true;
       aoe = -1;
+      reduced_aoe_targets = 5;  // tooltip: healing decreased beyond 5 targets
     }
   };
 
@@ -13569,7 +13571,9 @@ double druid_t::lifebloom_stacks() const
       if ( every <= 0 )
         return 1.0;
       double grown = ( sim->current_time() - lifebloom_applied ).total_seconds() / every;
-      return std::min( as<double>( max ), 1.0 + std::floor( grown ) );
+      double stacks = std::min( as<double>( max ), 1.0 + std::floor( grown ) );
+      // each extra stack adds about 12.5%: a real log goes 26.2k -> 29.5k from 2 to 3 stacks
+      return 1.0 + 0.125 * ( stacks - 1.0 );
     }
   }
   return 1.0;
