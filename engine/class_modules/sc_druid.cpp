@@ -2612,6 +2612,11 @@ struct druid_heal_t : public druid_spell_base_t<heal_t>
     {
       ctm *= 1.0 + harmony_multiplier( t );
 
+      // Root Network: its data lists damage spells only, but in logs its stacks follow Symbiotic Blooms
+      // and Restoration takes it for healing; assumed +2% healing per active bloom
+      if ( p()->talent.root_network.ok() )
+        ctm *= 1.0 + p()->buff.root_network->data().effectN( 1 ).percent() * p()->buff.root_network->check();
+
       if ( iron_mul && get_td( t )->buff.ironbark->up() )
          ctm *= 1.0 + iron_mul;
     }
@@ -6290,6 +6295,14 @@ struct symbiotic_blooms_t final : public druid_heal_t
     background = proc = true;
   }
 
+  void trigger_dot( action_state_t* s ) override
+  {
+    bool fresh = !find_dot( s->target ) || !find_dot( s->target )->is_ticking();
+    druid_heal_t::trigger_dot( s );
+    if ( fresh && p()->talent.root_network.ok() )
+      p()->buff.root_network->trigger();
+  }
+
   void tick( dot_t* d ) override
   {
     druid_heal_t::tick( d );
@@ -6302,6 +6315,9 @@ struct symbiotic_blooms_t final : public druid_heal_t
   {
     if ( p()->active.bursting_growth_heal && !d->target->is_sleeping() )
       p()->active.bursting_growth_heal->execute_on_target( d->target );
+
+    if ( p()->talent.root_network.ok() )
+      p()->buff.root_network->decrement();
 
     druid_heal_t::last_tick( d );
   }
@@ -6763,6 +6779,11 @@ struct rejuvenation_base_t : public druid_heal_t
   {
     druid_heal_t::impact( s );
 
+    // a real log shows ~45 Genesis procs a fight: every Rejuvenation applied rolls, not only casts
+    if ( p()->sets->has_set_bonus( DRUID_RESTORATION, MID2, B2 ) &&
+         rng().roll( p()->sets->set( DRUID_RESTORATION, MID2, B2 )->effectN( 1 ).percent() ) )
+      p()->buff.genesis->trigger();
+
     // Thriving Vegetation: an instant share of the whole HoT
     if ( auto tv = p()->active.thriving_vegetation )
     {
@@ -6812,9 +6833,6 @@ struct rejuvenation_t final : public rejuvenation_base_t
     if ( archdruid && p()->active.archdruid_rejuvenation )
       p()->spread_archdruid( p()->active.archdruid_rejuvenation, target );
 
-    if ( !background && p()->sets->has_set_bonus( DRUID_RESTORATION, MID2, B2 ) &&
-         rng().roll( p()->sets->set( DRUID_RESTORATION, MID2, B2 )->effectN( 1 ).percent() ) )
-      p()->buff.genesis->trigger();
 
     if ( !background )
       p()->buff.soul_of_the_forest_tree->expire();
@@ -10036,6 +10054,9 @@ struct convoke_the_spirits_t final : public trigger_control_of_the_dream_t<druid
     }
 
     cast_list.insert( cast_list.end(), max_ticks - cast_list.size(), CAST_SPEC );
+
+    if ( p()->sets->has_set_bonus( DRUID_RESTORATION, MID2, B4 ) )
+      p()->buff.genesis->trigger();
   }
 
   void tick( dot_t* d ) override
