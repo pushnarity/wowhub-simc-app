@@ -23,6 +23,9 @@ public:
   double base_pct_heal;
   double tick_pct_heal;
   gain_t* heal_gain;
+  // Picks its target at cast time (the most injured ally, HoTs first to allies without them) when
+  // the sim has healing targets and the action was not given a fixed target.
+  bool auto_target;
 
   heal_t( util::string_view name, player_t* p );
   heal_t( util::string_view name, player_t* p, const spell_data_t* s );
@@ -33,6 +36,8 @@ public:
   player_t* smart_target() const;  // Find random injured healing target, preferring non-pets // Might need to move up
                                    // hierarchy if there are smart absorbs
   void init() override;
+  player_t* pick_target() const;
+  void schedule_execute( action_state_t* state = nullptr ) override;
   void parse_heal_effect_data( const spelleffect_data_t& );
 
   virtual double composite_pct_heal( const action_state_t* ) const;

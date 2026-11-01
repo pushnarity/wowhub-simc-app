@@ -1122,10 +1122,66 @@ struct add_t : public pet_t
 
 struct heal_enemy_t : public enemy_t
 {
-  heal_enemy_t( sim_t* s, util::string_view n, race_e r = RACE_HUMANOID ) : enemy_t( s, n, r, HEALING_ENEMY )
+  // Incoming damage for healing sims, in shares of the target's maximum health, so a fight looks
+  // alike at any item level. "raid": 19 targets (2 tanks), the other healers top everyone up.
+  // "dungeon": 4 targets (1 tank), the simmed healer is the only healer.
+  struct profile_t
+  {
+    double ambient, ambient_every;
+    double pulse_lo, pulse_hi, pulse_every_lo, pulse_every_hi;
+    double spot_lo, spot_hi, spot_every;
+    double melee_lo, melee_hi, melee_every;
+    double buster, buster_every_lo, buster_every_hi;
+    double coheal;
+    int tanks;
+    double intensity;  // the whole profile's damage, tuned so a fully played healer overheals about as in logs
+  };
+
+  bool tank;
+  double reference_health;
+
+  heal_enemy_t( sim_t* s, util::string_view n, race_e r = RACE_HUMANOID )
+    : enemy_t( s, n, r, HEALING_ENEMY ), tank( false ), reference_health( 0 )
   {
     target     = this;
     true_level = s->max_player_level;  // set to default player level, not default+3
+  }
+
+  std::string profile_name() const
+  {
+    if ( sim->heal_damage_profile != "auto" )
+      return sim->heal_damage_profile;
+    bool dungeon = sim->fight_style == FIGHT_STYLE_DUNGEON_SLICE || sim->fight_style == FIGHT_STYLE_DUNGEON_ROUTE ||
+                   targets().size() <= 4;
+    return dungeon ? "dungeon" : "raid";
+  }
+
+  static const profile_t* profile( util::string_view name )
+  {
+    static const profile_t raid = { 0.010, 2.0, 0.22, 0.32, 15.0, 25.0, 0.15, 0.30, 4.0,
+                                    0.030, 0.050, 1.5, 0.40, 30.0, 40.0, 0.10, 2, 0.5 };
+    static const profile_t dungeon = { 0.010, 2.0, 0.18, 0.28, 12.0, 20.0, 0.18, 0.30, 6.0,
+                                       0.040, 0.070, 1.5, 0.35, 20.0, 30.0, 0.03, 1, 0.7 };
+    if ( name == "raid" )
+      return &raid;
+    if ( name == "dungeon" )
+      return &dungeon;
+    return nullptr;
+  }
+
+  std::vector<heal_enemy_t*> targets() const
+  {
+    std::vector<heal_enemy_t*> list;
+    for ( auto* p : sim->healing_no_pet_list )
+      if ( p->type == HEALING_ENEMY && !p->is_sleeping() )
+        list.push_back( static_cast<heal_enemy_t*>( p ) );
+    return list;
+  }
+
+  bool director() const
+  {
+    auto list = targets();
+    return !list.empty() && list.front() == this;
   }
 
   void init_resources( bool /* force */ ) override
@@ -1145,13 +1201,127 @@ struct heal_enemy_t : public enemy_t
 
     true_level = std::min( sim->max_player_level, true_level );
   }
+
   resource_e primary_resource() const override
   {
     return RESOURCE_HEALTH;
   }
 
-  //  void init_action_list()
-  //  { }
+  const profile_t* active = nullptr;
+
+  void hurt( double share )
+  {
+    double amount = share * resources.max[ RESOURCE_HEALTH ] * sim->heal_damage_scale * ( active ? active->intensity : 1.0 );
+    resources.current[ RESOURCE_HEALTH ] = std::max( 1.0, resources.current[ RESOURCE_HEALTH ] - amount );
+  }
+
+  void combat_begin() override
+  {
+    enemy_t::combat_begin();
+
+    const profile_t* pr = profile( profile_name() );
+    sim->print_log( "{} healing profile '{}'", *this, pr ? profile_name() : "none" );
+    if ( !pr )
+      return;
+
+    // Everyone's health follows the healer's own (same gear level); tanks have half as much again.
+    double ref = 0;
+    for ( auto* p : sim->player_list )
+      if ( !p->is_pet() && !p->is_enemy() && p->type != HEALING_ENEMY )
+      {
+        ref = p->resources.max[ RESOURCE_HEALTH ];
+        break;
+      }
+    if ( ref <= 0 )
+      return;
+    active = pr;
+
+    auto list = targets();
+    for ( size_t i = 0; i < list.size(); i++ )
+      if ( list[ i ] == this )
+        tank = as<int>( i ) < pr->tanks;
+    reference_health = ref;
+    resources.base[ RESOURCE_HEALTH ] = resources.max[ RESOURCE_HEALTH ] = ref * ( tank ? 1.5 : 1.0 );
+    resources.current[ RESOURCE_HEALTH ] = resources.max[ RESOURCE_HEALTH ];
+    sim->print_log( "{} takes '{}' damage as a {} with {} health", *this, profile_name(), tank ? "tank" : "raider",
+                    resources.max[ RESOURCE_HEALTH ] );
+
+    if ( tank )
+      schedule_melee( pr ), schedule_buster( pr, true );
+    else
+      schedule_ambient( pr );
+    if ( pr->coheal > 0 )
+      schedule_coheal( pr );
+
+    if ( director() )
+    {
+      schedule_pulse( pr, true );
+      schedule_spot( pr );
+    }
+  }
+
+  double roll( double lo, double hi )
+  {
+    return lo + rng().real() * ( hi - lo );
+  }
+
+  void schedule_melee( const profile_t* pr )
+  {
+    make_event( *sim, timespan_t::from_seconds( pr->melee_every ), [ this, pr ] {
+      hurt( roll( pr->melee_lo, pr->melee_hi ) );
+      schedule_melee( pr );
+    } );
+  }
+
+  void schedule_buster( const profile_t* pr, bool first )
+  {
+    double wait = roll( pr->buster_every_lo, pr->buster_every_hi ) * ( first ? 0.5 : 1.0 );
+    make_event( *sim, timespan_t::from_seconds( wait ), [ this, pr ] {
+      hurt( pr->buster );
+      schedule_buster( pr, false );
+    } );
+  }
+
+  void schedule_ambient( const profile_t* pr )
+  {
+    make_event( *sim, timespan_t::from_seconds( pr->ambient_every * roll( 0.75, 1.25 ) ), [ this, pr ] {
+      hurt( pr->ambient * roll( 0.5, 1.5 ) );
+      schedule_ambient( pr );
+    } );
+  }
+
+  void schedule_coheal( const profile_t* pr )
+  {
+    make_event( *sim, 1_s, [ this, pr ] {
+      double missing = resources.max[ RESOURCE_HEALTH ] - resources.current[ RESOURCE_HEALTH ];
+      resources.current[ RESOURCE_HEALTH ] += missing * pr->coheal;
+      schedule_coheal( pr );
+    } );
+  }
+
+  void schedule_pulse( const profile_t* pr, bool first )
+  {
+    double wait = roll( pr->pulse_every_lo, pr->pulse_every_hi ) * ( first ? 0.4 : 1.0 );
+    make_event( *sim, timespan_t::from_seconds( wait ), [ this, pr ] {
+      double share = roll( pr->pulse_lo, pr->pulse_hi );
+      for ( auto* t : targets() )
+        t->hurt( share * roll( 0.9, 1.1 ) );
+      schedule_pulse( pr, false );
+    } );
+  }
+
+  void schedule_spot( const profile_t* pr )
+  {
+    make_event( *sim, timespan_t::from_seconds( pr->spot_every * roll( 0.5, 1.5 ) ), [ this, pr ] {
+      std::vector<heal_enemy_t*> pool;
+      for ( auto* t : targets() )
+        if ( !t->tank )
+          pool.push_back( t );
+      if ( !pool.empty() )
+        pool[ static_cast<size_t>( rng().real() * pool.size() ) ]->hurt( roll( pr->spot_lo, pr->spot_hi ) );
+      schedule_spot( pr );
+    } );
+  }
 };
 
 // ==========================================================================

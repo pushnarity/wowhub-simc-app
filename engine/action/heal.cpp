@@ -22,10 +22,14 @@ heal_t::heal_t( util::string_view name, player_t* p, const spell_data_t* s )
     record_healing(),
     base_pct_heal(),
     tick_pct_heal(),
-    heal_gain( p->get_gain( name ) )
+    heal_gain( p->get_gain( name ) ),
+    auto_target( false )
 {
   if ( sim->heal_target && target == sim->target )
+  {
     target = sim->heal_target;
+    auto_target = true;
+  }
   else if ( !target || target->is_enemy() )
     target = p;
 
@@ -308,6 +312,40 @@ void heal_t::assess_damage( result_amount_type heal_type, action_state_t* s )
   }
 }
 
+player_t* heal_t::pick_target() const
+{
+  bool hot = dot_duration > 0_ms && base_dd_max <= 0 && spell_power_mod.direct <= 0;
+  player_t* best = nullptr;
+  double best_score = std::numeric_limits<double>::max();
+  for ( auto* t : sim->healing_no_pet_list )
+  {
+    if ( t->is_sleeping() )
+      continue;
+    double score = t->resources.pct( RESOURCE_HEALTH ) + rng().real() * 0.001;
+    dot_t* d = hot ? find_dot( t ) : nullptr;
+    if ( d && d->is_ticking() )
+      score += 10.0 + d->remains().total_seconds() / 100.0;
+    if ( score < best_score )
+    {
+      best_score = score;
+      best = t;
+    }
+  }
+  return best;
+}
+
+void heal_t::schedule_execute( action_state_t* state )
+{
+  if ( auto_target && !state && sim->heal_target )
+  {
+    if ( player_t* t = pick_target() )
+      if ( t != target )
+        set_target( t );
+    target_cache.is_valid = false;
+  }
+  spell_base_t::schedule_execute( state );
+}
+
 player_t* heal_t::find_greatest_difference_player()
 {
   double max = 0;
@@ -443,6 +481,12 @@ size_t heal_t::available_targets( std::vector<player_t*>& target_list ) const
       if ( !group_only || ( t->party == target->party ) )
         target_list.push_back( t );
   }
+
+  // Smart heals reach the most injured allies first.
+  if ( auto_target && target_list.size() > 2 )
+    std::stable_sort( target_list.begin() + 1, target_list.end(), []( player_t* a, player_t* b ) {
+      return a->resources.pct( RESOURCE_HEALTH ) < b->resources.pct( RESOURCE_HEALTH );
+    } );
 
   return target_list.size();
 }
