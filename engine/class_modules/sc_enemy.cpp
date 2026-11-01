@@ -1296,6 +1296,58 @@ struct heal_enemy_t : public enemy_t
       cb( this );
   }
 
+  player_t* replay_healer = nullptr;
+  std::vector<size_t> replay_mine;  // indices of this target's replay events (and the healer's, for the director)
+  size_t replay_pos = 0, replay_mana_pos = 0;
+
+  void replay_apply( const heal_replay_t::event_t& e )
+  {
+    if ( e.slot == -1 )
+    {
+      player_t* healer = replay_healer;
+      double amount = e.damage;
+      for ( auto* b : healer->absorb_buff_list )
+        if ( amount > 0 && b->check() )
+          amount -= b->consume( amount );
+      healer->resources.current[ RESOURCE_HEALTH ] =
+        std::clamp( healer->resources.current[ RESOURCE_HEALTH ] - amount + e.heal, 1.0,
+                    healer->resources.max[ RESOURCE_HEALTH ] );
+      if ( e.damage > 0 )
+        for ( auto& cb : sim->heal_hurt_callbacks )
+          cb( healer );
+      return;
+    }
+    if ( e.damage > 0 )
+      hurt_amount( e.damage );
+    if ( e.heal > 0 )
+      resources.current[ RESOURCE_HEALTH ] =
+        std::min( resources.max[ RESOURCE_HEALTH ], resources.current[ RESOURCE_HEALTH ] + e.heal );
+  }
+
+  void replay_next( const heal_replay_t* rp )
+  {
+    if ( replay_pos >= replay_mine.size() )
+      return;
+    auto at = timespan_t::from_seconds( rp->events[ replay_mine[ replay_pos ] ].t );
+    make_event( *sim, std::max( 0_ms, at - sim->current_time() ), [ this, rp, at ] {
+      while ( replay_pos < replay_mine.size() &&
+              timespan_t::from_seconds( rp->events[ replay_mine[ replay_pos ] ].t ) <= at )
+        replay_apply( rp->events[ replay_mine[ replay_pos++ ] ] );
+      replay_next( rp );
+    } );
+  }
+
+  void replay_mana_next( const heal_replay_t* rp, gain_t* g )
+  {
+    if ( replay_mana_pos >= rp->mana.size() )
+      return;
+    const auto& m = rp->mana[ replay_mana_pos ];
+    make_event( *sim, std::max( 0_ms, timespan_t::from_seconds( m.t ) - sim->current_time() ), [ this, rp, g ] {
+      replay_healer->resource_gain( RESOURCE_MANA, rp->mana[ replay_mana_pos++ ].amount, g );
+      replay_mana_next( rp, g );
+    } );
+  }
+
   void combat_begin() override
   {
     enemy_t::combat_begin();
@@ -1322,41 +1374,17 @@ struct heal_enemy_t : public enemy_t
             healer = p;
             break;
           }
+      // Events are booked one at a time as the previous one lands: booking a whole Mythic+ key at the pull
+      // overflows the event clock (it wraps at ~17 minutes and the sim stalls).
+      replay_healer = healer;
+      replay_mine.clear();
+      for ( size_t i = 0; i < rp->events.size(); i++ )
+        if ( rp->events[ i ].slot == slot || ( healer && rp->events[ i ].slot == -1 ) )
+          replay_mine.push_back( i );
+      replay_pos = replay_mana_pos = 0;
+      replay_next( rp );
       if ( healer )
-      {
-        gain_t* g = healer->get_gain( "external_mana" );
-        for ( const auto& m : rp->mana )
-          make_event( *sim, timespan_t::from_seconds( m.t ),
-                      [ healer, g, m ] { healer->resource_gain( RESOURCE_MANA, m.amount, g ); } );
-      }
-      for ( const auto& e : rp->events )
-      {
-        if ( e.slot == -1 && healer )
-        {
-          make_event( *sim, timespan_t::from_seconds( e.t ), [ this, healer, e ] {
-            double amount = e.damage;
-            for ( auto* b : healer->absorb_buff_list )
-              if ( amount > 0 && b->check() )
-                amount -= b->consume( amount );
-            healer->resources.current[ RESOURCE_HEALTH ] =
-              std::clamp( healer->resources.current[ RESOURCE_HEALTH ] - amount + e.heal, 1.0,
-                          healer->resources.max[ RESOURCE_HEALTH ] );
-            if ( e.damage > 0 )
-              for ( auto& cb : sim->heal_hurt_callbacks )
-                cb( healer );
-          } );
-          continue;
-        }
-        if ( e.slot != slot )
-          continue;
-        make_event( *sim, timespan_t::from_seconds( e.t ), [ this, e ] {
-          if ( e.damage > 0 )
-            hurt_amount( e.damage );
-          if ( e.heal > 0 )
-            resources.current[ RESOURCE_HEALTH ] =
-              std::min( resources.max[ RESOURCE_HEALTH ], resources.current[ RESOURCE_HEALTH ] + e.heal );
-        } );
-      }
+        replay_mana_next( rp, healer->get_gain( "external_mana" ) );
       return;
     }
 

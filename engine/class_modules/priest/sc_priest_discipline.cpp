@@ -17,7 +17,8 @@ struct power_word_radiance_t final : public priest_heal_t
   timespan_t atonement_duration;
 
   power_word_radiance_t( priest_t& p, std::string_view name, util::string_view options_str )
-    : priest_heal_t( name, p, p.talents.discipline.power_word_radiance )
+    : priest_heal_t( name, p,
+                     name == "evangelism_radiance" ? p.find_spell( 194509 ) : p.talents.discipline.power_word_radiance )
   {
     parse_options( options_str );
     harmful      = false;
@@ -173,10 +174,13 @@ struct evangelism_t final : public priest_heal_t
 
     harmful = false;
 
-    evangelism_radiance =
-        priest().get_secondary_action<power_word_radiance_t>( "evangelism_radiance", "evangelism_radiance", "" );
+    // wowhub: only with the talent (the action is listed for every Disc build)
+    evangelism_radiance = nullptr;
+    if ( p.talents.discipline.evangelism.enabled() )
+      evangelism_radiance =
+          priest().get_secondary_action<power_word_radiance_t>( "evangelism_radiance", "evangelism_radiance", "" );
 
-    if ( !evangelism_radiance->stats->parent )
+    if ( evangelism_radiance && !evangelism_radiance->stats->parent )
     {
       evangelism_radiance->proc = true;
       evangelism_radiance->dual = true;
@@ -188,7 +192,7 @@ struct evangelism_t final : public priest_heal_t
   void impact( action_state_t* s ) override
   {
     priest_heal_t::impact( s );
-    if ( result_is_hit( s->result ) )
+    if ( result_is_hit( s->result ) && evangelism_radiance )
     {
       evangelism_radiance->execute_on_target( s->target );
     }
@@ -929,7 +933,9 @@ void priest_t::init_spells_discipline()
 // ==========================================================================
 // wowhub: Discipline healing priority for healing sims. Upstream's list with two changes measured on real
 // logs: Surge of Light Flash Heals are used freely, and Flash Heal replaces Smite while mana is ahead of an
-// even spend over the fight (top priests cast ~32 Flash Heals in 5 minutes and still end with mana).
+// even spend over the fight, for Oracle (top Oracle priests cast ~32 Flash Heals in 5 minutes and still end with
+// mana; Voidweavers cast 9-16). In dungeons Power Word: Shield goes out on cooldown while mana keeps up: the
+// upstream rule assumes a 5-minute fight and blocks it for most of a 30-minute key (top keys: 128 casts).
 // ==========================================================================
 void priest_t::apl_discipline_heal()
 {
@@ -946,7 +952,7 @@ void priest_t::apl_discipline_heal()
   precombat->add_action( "evangelism,target_if=min:debuff.atonement.remains+10*(target=self)" );
   precombat->add_action( "mind_blast" );
   shield->add_action( "void_shield,target_if=min:debuff.atonement.remains+10*(target=self)+100*(!debuff.atonement.up)" );
-  shield->add_action( "power_word_shield,target_if=min:debuff.atonement.remains+10*(target=self)+100*(!debuff.atonement.up),if=talent.borrowed_time&(mana.pct*2.5>=fight_remains|talent.shield_discipline&mana.pct*6>=fight_remains)" );
+  shield->add_action( "power_word_shield,target_if=min:debuff.atonement.remains+10*(target=self)+100*(!debuff.atonement.up),if=talent.borrowed_time&(mana.pct*2.5>=fight_remains|talent.shield_discipline&mana.pct*6>=fight_remains|group_size<=5&mana.pct>=20+60*fight_remains%(time+fight_remains))" );
   default_->add_action( "shadow_word_pain,if=refreshable" );
   default_->add_action( "power_infusion" );
   default_->add_action( "invoke_external_buff,name=power_infusion" );
@@ -970,7 +976,7 @@ void priest_t::apl_discipline_heal()
   default_->add_action( "flash_heal,target_if=min:debuff.atonement.remains+20*(target=self),if=buff.atonement.remains<=gcd.max&(mana.pct*2.5*3>=fight_remains|talent.shield_discipline&mana.pct*6*3>=fight_remains|mana.pct>=90)" );
   default_->add_action( "void_blast" );
   default_->add_action( "power_word_radiance,target_if=min:debuff.atonement.remains+10*(target=self)" );
-  default_->add_action( "flash_heal,target_if=min:debuff.atonement.remains+20*(target=self),if=mana.pct>=40+50*fight_remains%(time+fight_remains)" );
+  default_->add_action( "flash_heal,target_if=min:debuff.atonement.remains+20*(target=self),if=talent.piety&mana.pct>=40+50*fight_remains%(time+fight_remains)" );
   default_->add_action( "smite" );
 }
 

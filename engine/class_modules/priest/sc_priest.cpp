@@ -1728,8 +1728,11 @@ struct flash_heal_t final : public priest_heal_t
   {
   }
 
+  // wowhub: the Shadow Mend talent (1252217) upgrades Flash Heal to Shadow Mend, a bigger and dearer heal
   flash_heal_t( priest_t& p, util::string_view name, util::string_view options_str, bool bind = false )
-    : priest_heal_t( name, p, p.find_class_spell( "Flash Heal" ) ),
+    : priest_heal_t( name, p,
+                     !bind && p.talents.discipline.shadow_mend.enabled() ? p.find_spell( 186263 )
+                                                                          : p.find_class_spell( "Flash Heal" ) ),
       atonement_duration( timespan_t::from_seconds( p.talents.discipline.atonement_buff->effectN( 3 ).base_value() ) ),
       binding_heal_percent( p.talents.binding_heals->effectN( 1 ).percent() ),
       binding( bind )

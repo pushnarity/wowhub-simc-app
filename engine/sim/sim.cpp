@@ -3615,6 +3615,10 @@ std::unique_ptr<expr_t> sim_t::create_expression( util::string_view name_str )
   if ( util::str_compare_ci( name_str, "active_allies" ) )
     return make_ref_expr( name_str, active_allies );
 
+  // wowhub: people a healer looks after (the healer plus the healing targets): 5 in a dungeon, 20 in a raid
+  if ( util::str_compare_ci( name_str, "group_size" ) )
+    return make_fn_expr( name_str, [ this ] { return static_cast<double>( healing_no_pet_list.size() ); } );
+
   if ( util::str_compare_ci( name_str, "active_allied_augmentations" ) )
   {
     if ( player_list.size() == 1U )
