@@ -312,14 +312,14 @@ void heal_t::assess_damage( result_amount_type heal_type, action_state_t* s )
   }
 }
 
-player_t* heal_t::pick_target() const
+player_t* heal_t::pick_target()
 {
   bool hot = dot_duration > 0_ms && base_dd_max <= 0 && spell_power_mod.direct <= 0;
   player_t* best = nullptr;
   double best_score = std::numeric_limits<double>::max();
   for ( auto* t : sim->healing_no_pet_list )
   {
-    if ( t->is_sleeping() )
+    if ( t->is_sleeping() || !target_ready( t ) )
       continue;
     double score = t->resources.pct( RESOURCE_HEALTH ) + rng().real() * 0.001;
     dot_t* d = hot ? find_dot( t ) : nullptr;

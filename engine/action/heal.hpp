@@ -36,7 +36,7 @@ public:
   player_t* smart_target() const;  // Find random injured healing target, preferring non-pets // Might need to move up
                                    // hierarchy if there are smart absorbs
   void init() override;
-  player_t* pick_target() const;
+  virtual player_t* pick_target();
   void schedule_execute( action_state_t* state = nullptr ) override;
   void parse_heal_effect_data( const spelleffect_data_t& );
 

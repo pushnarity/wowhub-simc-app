@@ -541,6 +541,10 @@ struct druid_t final : public parse_player_effects_t
   // Guardian
   player_t* red_moon_target;  // lunar wrath hits most recent rm target
   timespan_t rampant_thorn_berserk_extension;  // mid2 4pc
+  // Restoration
+  timespan_t efflo_expires;      // Efflorescence is limited to one at a time
+  player_t* lifebloom_target;
+  timespan_t lifebloom_applied;  // Everbloom stacks grow from this moment
 
   struct dot_list_t
   {
@@ -639,6 +643,18 @@ struct druid_t final : public parse_player_effects_t
 
     // Restoration
     action_t* yseras_gift;
+    action_t* efflorescence_auto;  // lifetreading
+    action_t* everbloom;
+    action_t* grove_nourish;
+    action_t* overgrowth_rejuvenation;
+    action_t* overgrowth_wild_growth;
+    action_t* rampant_regrowth;
+    action_t* archdruid_rejuvenation;
+    action_t* archdruid_regrowth;
+    action_t* thriving_vegetation;
+    action_t* verdancy;
+    action_t* symbiotic_blooms;
+    action_t* bursting_growth_heal;
 
     // Hero talents
     action_t* bloodseeker_vines;
@@ -1408,6 +1424,13 @@ struct druid_t final : public parse_player_effects_t
 
   template <typename T, bool PROC = true, typename... Ts>
   T* get_secondary_action( std::string_view n, Ts&&... args );
+
+  // Restoration helpers
+  double lifebloom_stacks() const;
+  void spread_archdruid( action_t* copy, player_t* first );
+  void on_swiftmend_or_wild_growth( player_t* t );
+  void summon_grove_guardian();
+  cooldown_t* grove_guardians_cd = nullptr;
 
 private:
   void apl_precombat();
@@ -6120,7 +6143,26 @@ struct efflorescence_t final : public druid_heal_t
         return l->health_percentage() < r->health_percentage();
       } );
 
+      // Not everyone stands in the circle: raids spread out more than a dungeon group.
+      size_t allies = 0;
+      for ( auto* t : sim->healing_no_pet_list )
+        allies += t->type == HEALING_ENEMY;
+      if ( allies )
+      {
+        double share = allies > 4 ? 0.6 : 0.9;
+        tl.erase( std::remove_if( tl.begin(), tl.end(), [ this, share ]( player_t* ) { return !rng().roll( share ); } ),
+                  tl.end() );
+      }
+
       return tl;
+    }
+
+    void impact( action_state_t* s ) override
+    {
+      druid_heal_t::impact( s );
+
+      if ( s->chain_target == 0 && p()->rngs.symbiotic_blooms )
+        p()->rngs.symbiotic_blooms->trigger( s );
     }
 
     void execute() override
@@ -6146,7 +6188,11 @@ struct efflorescence_t final : public druid_heal_t
     if ( data().ok() )
     {
       heal = p->get_secondary_action<efflorescence_tick_t>( "efflorescence_tick" );
-      replace_stats( this, heal );
+      // a second Efflorescence (Lifetreading's) joins the stats the tick already reports to
+      if ( heal->stats->name_str == heal->name_str )
+        replace_stats( this, heal );
+      else
+        replace_stats( heal, this, false );
 
       params.hasted( ground_aoe_params_t::hasted_with::SPELL_HASTE )
         .pulse_time( period )
@@ -6155,9 +6201,19 @@ struct efflorescence_t final : public druid_heal_t
     }
   }
 
+  bool ready() override
+  {
+    if ( p()->efflo_expires > sim->current_time() )
+      return false;
+
+    return druid_heal_t::ready();
+  }
+
   void execute() override
   {
     druid_heal_t::execute();
+
+    p()->efflo_expires = sim->current_time() + duration;
 
     params.start_time( timespan_t::min() )  // reset start time
       .target( target );
@@ -6189,13 +6245,126 @@ struct ironbark_t final : public druid_heal_t
 };
 
 // Lifebloom ================================================================
+// Healing that is a share of another heal: the source already carries every multiplier and crit.
+struct druid_share_heal_t : public druid_residual_action_t<druid_heal_t>
+{
+  druid_share_heal_t( druid_t* p, std::string_view n, const spell_data_t* s ) : base_t( n, p, s )
+  {
+    background = true;
+    may_crit = false;
+  }
+
+  double composite_da_multiplier( const action_state_t* ) const override { return 1.0; }
+  double composite_target_multiplier( player_t* ) const override { return 1.0; }
+  double composite_versatility( const action_state_t* ) const override { return 0.0; }
+
+  void heal_share( player_t* t, double amount )
+  {
+    base_dd_min = base_dd_max = amount;
+    execute_on_target( t );
+  }
+};
+
+// Symbiotic Blooms (Wildstalker) ===============================================
+struct bursting_growth_heal_t final : public druid_heal_t
+{
+  bursting_growth_heal_t( druid_t* p ) : druid_heal_t( "bursting_growth_heal", p, p->find_spell( 440121 ) )
+  {
+    background = proc = true;
+    aoe = as<int>( data().effectN( 2 ).base_value() );
+  }
+};
+
+struct symbiotic_blooms_t final : public druid_heal_t
+{
+  double rampancy_chance;
+
+  symbiotic_blooms_t( druid_t* p )
+    : druid_heal_t( "symbiotic_blooms", p, p->find_spell( 439530 ) ),
+      rampancy_chance( p->talent.rampancy->effectN( 2 ).percent() )
+  {
+    background = proc = true;
+  }
+
+  void tick( dot_t* d ) override
+  {
+    druid_heal_t::tick( d );
+
+    if ( rampancy_chance && p()->active.bursting_growth_heal && rng().roll( rampancy_chance ) )
+      p()->active.bursting_growth_heal->execute_on_target( d->target );
+  }
+
+  void last_tick( dot_t* d ) override
+  {
+    if ( p()->active.bursting_growth_heal && !d->target->is_sleeping() )
+      p()->active.bursting_growth_heal->execute_on_target( d->target );
+
+    druid_heal_t::last_tick( d );
+  }
+};
+
+// Nourish cast by a Grove Guardian treant ======================================
+struct grove_nourish_t final : public druid_heal_t
+{
+  grove_nourish_t( druid_t* p ) : druid_heal_t( "grove_guardians_nourish", p, p->find_spell( 422090 ) )
+  {
+    background = proc = true;
+    aoe = 0;
+  }
+};
+
+// Verdancy: Lifebloom's bloom heals allies standing in Efflorescence
+struct verdancy_t final : public druid_heal_t
+{
+  verdancy_t( druid_t* p ) : druid_heal_t( "verdancy", p, p->find_spell( 392329 ) )
+  {
+    background = proc = true;
+    aoe = as<int>( p->talent.verdancy->effectN( 1 ).base_value() );
+  }
+};
+
 struct lifebloom_t final : public druid_heal_t
 {
   struct lifebloom_bloom_t final : public druid_heal_t
   {
+    double everbloom_share = 0.0;
+    int everbloom_targets = 0;
+
     lifebloom_bloom_t( druid_t* p ) : druid_heal_t( "lifebloom_bloom", p, p->find_spell( 33778 ) )
     {
       background = dual = true;
+
+      for ( const auto& t : { p->talent.everbloom_1, p->talent.everbloom_2, p->talent.everbloom_3 } )
+      {
+        if ( t.ok() && t->id() == 1244331 )
+        {
+          everbloom_share = t->effectN( 2 ).percent();
+          everbloom_targets = as<int>( t->effectN( 3 ).base_value() );
+        }
+      }
+    }
+
+    void impact( action_state_t* s ) override
+    {
+      druid_heal_t::impact( s );
+
+      if ( p()->active.verdancy && p()->efflo_expires > sim->current_time() )
+        p()->active.verdancy->execute_on_target( s->target );
+
+      // the share is split between the allies it reaches
+      if ( everbloom_share && everbloom_targets && p()->active.everbloom )
+      {
+        auto share = static_cast<druid_share_heal_t*>( p()->active.everbloom );
+        std::vector<player_t*> hurt;
+        for ( auto* t : sim->healing_no_pet_list )
+          if ( t != s->target && !t->is_sleeping() && t->health_percentage() < 100 )
+            hurt.push_back( t );
+        range::sort( hurt, []( player_t* a, player_t* b ) { return a->health_percentage() < b->health_percentage(); } );
+        if ( hurt.size() > as<size_t>( everbloom_targets ) )
+          hurt.resize( everbloom_targets );
+        for ( auto* t : hurt )
+          share->heal_share( t, s->result_total * everbloom_share / hurt.size() );
+      }
     }
   };
 
@@ -6210,8 +6379,33 @@ struct lifebloom_t final : public druid_heal_t
     }
   }
 
+  // Lifebloom lives on a tank and stays there.
+  player_t* pick_target() override
+  {
+    if ( auto t = p()->lifebloom_target; t && !t->is_sleeping() )
+      return t;
+    for ( auto* t : sim->healing_no_pet_list )
+      if ( !t->is_sleeping() && t->primary_role() == ROLE_TANK )
+        return t;
+    return druid_heal_t::pick_target();
+  }
+
+  double composite_ta_multiplier( const action_state_t* s ) const override
+  {
+    return druid_heal_t::composite_ta_multiplier( s ) * p()->lifebloom_stacks();
+  }
+
   void impact( action_state_t* s ) override
   {
+    if ( p()->lifebloom_target != s->target )
+    {
+      p()->lifebloom_target = s->target;
+      p()->lifebloom_applied = sim->current_time();
+    }
+
+    if ( p()->active.efflorescence_auto && p()->efflo_expires <= sim->current_time() )
+      p()->active.efflorescence_auto->execute_on_target( s->target );
+
     // Cancel dot on all targets other than the one we impact on
     for ( const auto& t : sim->player_non_sleeping_list )
     {
@@ -6424,9 +6618,41 @@ struct regrowth_t final : public trigger_thriving_growth_t<use_dot_list_t<druid_
 
   void execute() override
   {
+    if ( p()->talent.abundance.ok() && !background )
+    {
+      int rejuvs = 0;
+      for ( auto* t : sim->healing_no_pet_list )
+        rejuvs += td( t )->hots.rejuvenation->is_ticking() + td( t )->hots.germination->is_ticking();
+      if ( rejuvs >= p()->talent.abundance->effectN( 1 ).base_value() )
+        p()->buff.abundance->trigger();
+      else
+        p()->buff.abundance->expire();
+    }
+
+    bool overgrowth = !background && p()->talent.overgrowth.ok() && p()->buff.natures_swiftness->check();
+    bool archdruid = !background && p()->talent.power_of_the_archdruid.ok() && p()->buff.soul_of_the_forest_tree->check();
+
     is_direct = true;
     base_t::execute();
     is_direct = false;
+
+    if ( overgrowth )
+    {
+      if ( p()->active.overgrowth_rejuvenation )
+        p()->active.overgrowth_rejuvenation->execute_on_target( target );
+      if ( p()->active.overgrowth_wild_growth )
+        p()->active.overgrowth_wild_growth->execute_on_target( target );
+    }
+
+    if ( !background && p()->active.rampant_regrowth && p()->lifebloom_target && p()->lifebloom_target != target &&
+         !p()->lifebloom_target->is_sleeping() )
+      p()->active.rampant_regrowth->execute_on_target( p()->lifebloom_target );
+
+    if ( archdruid && p()->active.archdruid_regrowth )
+      p()->spread_archdruid( p()->active.archdruid_regrowth, target );
+
+    if ( !background )
+      p()->buff.soul_of_the_forest_tree->expire();
 
     p()->buff.forestwalk->trigger( this );
 
@@ -6482,6 +6708,20 @@ struct rejuvenation_base_t : public druid_heal_t
     if ( cult_hot && d->target->health_percentage() <= cult_pct )
       cult_hot->execute_on_target( d->target );
   }
+
+  void impact( action_state_t* s ) override
+  {
+    druid_heal_t::impact( s );
+
+    // Thriving Vegetation: an instant share of the whole HoT
+    if ( auto tv = p()->active.thriving_vegetation )
+    {
+      double ticks = composite_dot_duration( s ) / tick_time( s );
+      double total = calculate_tick_amount( s, 1.0 ) * ticks;
+      static_cast<druid_share_heal_t*>( tv )->heal_share( s->target,
+                                                          total * p()->talent.thriving_vegetation->effectN( 1 ).percent() );
+    }
+  }
 };
 
 struct rejuvenation_t final : public rejuvenation_base_t
@@ -6501,6 +6741,9 @@ struct rejuvenation_t final : public rejuvenation_base_t
 
   void execute() override
   {
+    bool archdruid = !background && p()->talent.power_of_the_archdruid.ok() && p()->buff.soul_of_the_forest_tree->check();
+    bool germ = false;
+
     if ( p()->talent.germination.ok() )
     {
       auto hots = td( target )->hots;
@@ -6509,11 +6752,42 @@ struct rejuvenation_t final : public rejuvenation_base_t
            ( hots.germination->remains() < hots.rejuvenation->remains() ) )
       {
         germination->execute_on_target( target );
-        return;
+        germ = true;
       }
     }
 
-    druid_heal_t::execute();
+    if ( !germ )
+      druid_heal_t::execute();
+
+    if ( archdruid && p()->active.archdruid_rejuvenation )
+      p()->spread_archdruid( p()->active.archdruid_rejuvenation, target );
+
+    if ( !background )
+      p()->buff.soul_of_the_forest_tree->expire();
+  }
+
+  // HoTs go to allies without one; with Germination a second one is welcome.
+  player_t* pick_target() override
+  {
+    if ( !p()->talent.germination.ok() )
+      return rejuvenation_base_t::pick_target();
+
+    player_t* best = nullptr;
+    double best_score = std::numeric_limits<double>::max();
+    for ( auto* t : sim->healing_no_pet_list )
+    {
+      if ( t->is_sleeping() )
+        continue;
+      auto hots = td( t )->hots;
+      double score = t->resources.pct( RESOURCE_HEALTH ) + rng().real() * 0.001 +
+                     10.0 * ( hots.rejuvenation->is_ticking() + hots.germination->is_ticking() );
+      if ( score < best_score )
+      {
+        best_score = score;
+        best = t;
+      }
+    }
+    return best;
   }
 };
 
@@ -6548,9 +6822,32 @@ struct swiftmend_t final : public druid_heal_t
 
   void execute() override
   {
+    double hp = target->health_percentage();
+
     druid_heal_t::execute();
 
     p()->buff.soul_of_the_forest_tree->trigger();
+
+    if ( p()->talent.renewing_surge.ok() )
+    {
+      double lo = p()->talent.renewing_surge->effectN( 1 ).percent();
+      double hi = p()->talent.renewing_surge->effectN( 2 ).percent();
+      cooldown->adjust( -cooldown->duration * ( lo + ( hi - lo ) * ( 1.0 - hp / 100.0 ) ) );
+    }
+
+    p()->on_swiftmend_or_wild_growth( target );
+
+    // Everbloom: Lifebloom bursts into a Blooming Frenzy
+    for ( const auto& t : { p()->talent.everbloom_1, p()->talent.everbloom_2, p()->talent.everbloom_3 } )
+    {
+      if ( t.ok() && t->id() == 1244470 && p()->lifebloom_target )
+      {
+        auto lb = td( p()->lifebloom_target )->hots.lifebloom;
+        if ( lb->is_ticking() )
+          for ( int i = 0; i < t->effectN( 1 ).base_value(); i++ )
+            static_cast<lifebloom_t*>( lb->current_action )->bloom->execute_on_target( p()->lifebloom_target );
+      }
+    }
   }
 
   void impact( action_state_t* s ) override
@@ -6608,12 +6905,12 @@ struct tranquility_t final : public druid_heal_t
 // where:
 //   t = time of tick = current_time - start_time
 //   D = full duration of WG
-struct wild_growth_t final : public druid_heal_t
+struct wild_growth_t final : public trigger_thriving_growth_t<use_dot_list_t<druid_heal_t>>
 {
   double decay_coeff;
   int inc_mod;
 
-  DRUID_ABILITY( wild_growth_t, druid_heal_t, "wild_growth", p->talent.wild_growth ),
+  DRUID_ABILITY( wild_growth_t, base_t, "wild_growth", p->talent.wild_growth ),
     decay_coeff( 0.07 * ( 1.0 - p->talent.unstoppable_growth->effectN( 1 ).percent() ) ),
     inc_mod( as<int>( p->talent.incarnation_tree->effectN( 3 ).base_value() ) )
   {
@@ -6623,11 +6920,21 @@ struct wild_growth_t final : public druid_heal_t
     spell_power_mod.tick += decay_coeff / 2.0;
 
     form_mask = CASTER_FORM;
+
+    dot_list = &p->dot_lists.wild_growth;
+  }
+
+  void execute() override
+  {
+    base_t::execute();
+
+    if ( !background )
+      p()->on_swiftmend_or_wild_growth( target );
   }
 
   double spell_tick_power_coefficient( const action_state_t* s ) const override
   {
-    auto c = druid_heal_t::spell_tick_power_coefficient( s );
+    auto c = base_t::spell_tick_power_coefficient( s );
     auto dot = find_dot( s->target );
 
     c -= decay_coeff * ( 1.0 - dot->remains() / dot->duration() );
@@ -6637,7 +6944,7 @@ struct wild_growth_t final : public druid_heal_t
 
   int n_targets() const override
   {
-    int n = druid_heal_t::n_targets();
+    int n = base_t::n_targets();
 
     if ( n && p()->buff.incarnation_tree->check() )
       n += inc_mod;
@@ -10222,6 +10529,7 @@ action_t* druid_t::create_action( std::string_view name, std::string_view opt )
   else if ( name == "heart_of_the_wild"             ) a =            new heart_of_the_wild_t( this );
   else if ( name == "incapacitating_roar"           ) a =          new incapacitating_roar_t( this );
   else if ( name == "innervate"                     ) a =                    new innervate_t( this );
+  else if ( name == "natures_swiftness"             ) a =            new natures_swiftness_t( this );
   else if ( name == "ironfur"                       ) a =                      new ironfur_t( this );
   else if ( name == "maim"                          ) a =                         new maim_t( this );
   else if ( name == "moonkin_form"                  ) a =                 new moonkin_form_t( this );
@@ -10760,6 +11068,8 @@ void druid_t::init_spells()
 
   register_passive_effect_mask( talent.patient_custodian, specialization() == DRUID_FERAL
     ? effect_mask_t( false ).enable( 1, 2 ) : effect_mask_t( false ).enable( 3, 4 ) );
+  register_passive_effect_mask( talent.wildstalkers_power, specialization() == DRUID_FERAL
+    ? effect_mask_t( false ).enable( 1, 2 ) : effect_mask_t( false ).enable( 3, 4, 5 ) );
   register_passive_effect_mask( talent.strike_for_the_heart, specialization() == DRUID_FERAL
     ? effect_mask_t( false ).enable( 1, 2, 3 ) : effect_mask_t( false ).enable( 4, 5 ) );
 
@@ -11966,6 +12276,76 @@ void druid_t::create_actions()
   if ( talent.yseras_gift.ok() )
     active.yseras_gift = get_secondary_action<yseras_gift_t>( "yseras_gift" );
 
+  if ( specialization() == DRUID_RESTORATION )
+  {
+    if ( talent.lifetreading.ok() && talent.efflorescence.ok() )
+    {
+      auto ef = get_secondary_action<efflorescence_t>( "efflorescence" );
+      ef->background = true;
+      ef->base_costs[ RESOURCE_MANA ] = 0;
+      ef->trigger_gcd = 0_ms;
+      active.efflorescence_auto = ef;
+    }
+
+    for ( const auto& t : { talent.everbloom_1, talent.everbloom_2, talent.everbloom_3 } )
+      if ( t.ok() && t->id() == 1244331 )
+        active.everbloom = get_secondary_action<druid_share_heal_t>( "everbloom", find_spell( 1244341 ) );
+
+    if ( talent.verdancy.ok() )
+      active.verdancy = get_secondary_action<verdancy_t>( "verdancy" );
+
+    if ( talent.thriving_vegetation.ok() )
+      active.thriving_vegetation =
+        get_secondary_action<druid_share_heal_t>( "thriving_vegetation", find_spell( 447132 ) );
+
+    if ( talent.grove_guardians.ok() )
+    {
+      active.grove_nourish = get_secondary_action<grove_nourish_t>( "grove_guardians_nourish" );
+      grove_guardians_cd = get_cooldown( "grove_guardians_summon" );
+      auto gg = find_spell( 102693 );
+      grove_guardians_cd->duration = gg->charge_cooldown();
+      grove_guardians_cd->charges = std::max( 1, as<int>( gg->charges() ) );
+    }
+
+    // Copies share the spell's name so they share its HoT on the target (Swiftmend, Harmony).
+    auto free_copy = []( action_t* a ) {
+      a->background = true;
+      a->base_costs[ RESOURCE_MANA ] = 0;
+      a->trigger_gcd = 0_ms;
+      return a;
+    };
+    if ( talent.overgrowth.ok() || talent.power_of_the_archdruid.ok() )
+    {
+      auto r = free_copy( get_secondary_action<rejuvenation_t>( "rejuvenation" ) );
+      active.overgrowth_rejuvenation = active.archdruid_rejuvenation = r;
+    }
+    if ( talent.overgrowth.ok() )
+    {
+      auto w = free_copy( get_secondary_action<wild_growth_t>( "wild_growth" ) );
+      w->aoe = 0;
+      active.overgrowth_wild_growth = w;
+    }
+    if ( talent.power_of_the_archdruid.ok() )
+      active.archdruid_regrowth = free_copy( get_secondary_action<regrowth_t>( "regrowth" ) );
+    if ( talent.rampant_growth.ok() )
+    {
+      // only the HoT: Rampant Growth copies Regrowth's healing over time to the Lifebloom target
+      auto r = new regrowth_t( this, "regrowth" );
+      secondary_action_list.push_back( r );
+      free_copy( r );
+      r->spell_power_mod.direct = 0;
+      r->base_dd_min = r->base_dd_max = 0;
+      active.rampant_regrowth = r;
+    }
+
+    if ( talent.thriving_growth.ok() )
+    {
+      active.symbiotic_blooms = get_secondary_action<symbiotic_blooms_t>( "symbiotic_blooms" );
+      if ( talent.bursting_growth.ok() )
+        active.bursting_growth_heal = get_secondary_action<bursting_growth_heal_t>( "bursting_growth_heal" );
+    }
+  }
+
   // Hero talents
   if ( talent.boundless_moonlight.ok() && talent.lunar_beam.ok() )
   {
@@ -12363,7 +12743,7 @@ struct thriving_growth_rng_t : public proc_rng_t
 
   int _calculate( const coeffs_t& c, action_state_t* s )
   {
-    auto raw = c.scale * c.scale_mul / std::pow( as<double>( c.dot_list->size() ), c.dot_exp );
+    auto raw = c.scale * c.scale_mul / std::pow( std::max( 1.0, as<double>( c.dot_list->size() ) ), c.dot_exp );
     auto val = player->rng().range( 0.0, raw * rng_mult );
 
     count += val;
@@ -12379,8 +12759,8 @@ struct thriving_growth_rng_t : public proc_rng_t
 
     if ( result )
     {
-      if ( c.action )
-        c.action->execute_on_target( s->target );
+      if ( auto a = c.action ? c.action : p->active.symbiotic_blooms )
+        a->execute_on_target( s->target );
 
       reset( reset_type_e::COMBAT );
     }
@@ -12437,7 +12817,8 @@ void druid_t::init_rng()
   if ( talent.thriving_growth.ok() )
   {
     rngs.bloodseeker_vines = get_rng<thriving_growth_rng_t>( "bloodseeker_vines" );
-    // rngs.symbiotic_blooms = get_rng<thriving_growth_rng_t>( "symbiotic_blooms" );  // NYI
+    if ( specialization() == DRUID_RESTORATION )
+      rngs.symbiotic_blooms = get_rng<thriving_growth_rng_t>( "symbiotic_blooms" );
   }
 }
 
@@ -13041,6 +13422,80 @@ parsed_assisted_combat_rule_t druid_t::parse_assisted_combat_rule( const assiste
 }
 
 // druid_t::reset ===========================================================
+// Restoration helpers =======================================================
+double druid_t::lifebloom_stacks() const
+{
+  if ( !talent.everbloom_1.ok() && !talent.everbloom_2.ok() && !talent.everbloom_3.ok() )
+    return 1.0;
+
+  for ( const auto& t : { talent.everbloom_1, talent.everbloom_2, talent.everbloom_3 } )
+  {
+    if ( t.ok() && t->id() == 392167 )
+    {
+      double every = t->effectN( 1 ).base_value();
+      int max = 1 + as<int>( t->effectN( 2 ).base_value() );
+      if ( every <= 0 )
+        return 1.0;
+      double grown = ( sim->current_time() - lifebloom_applied ).total_seconds() / every;
+      return std::min( as<double>( max ), 1.0 + std::floor( grown ) );
+    }
+  }
+  return 1.0;
+}
+
+// Power of the Archdruid: the empowered HoT also reaches the most injured allies without it
+void druid_t::spread_archdruid( action_t* copy, player_t* first )
+{
+  std::vector<player_t*> pool;
+  for ( auto* t : sim->healing_no_pet_list )
+    if ( t != first && !t->is_sleeping() && !copy->find_dot( t ) )
+      pool.push_back( t );
+  for ( auto* t : sim->healing_no_pet_list )
+    if ( t != first && !t->is_sleeping() && copy->find_dot( t ) && !copy->find_dot( t )->is_ticking() )
+      pool.push_back( t );
+  range::sort( pool, []( player_t* a, player_t* b ) { return a->health_percentage() < b->health_percentage(); } );
+  int n = as<int>( talent.power_of_the_archdruid->effectN( 1 ).base_value() );
+  for ( int i = 0; i < n && i < as<int>( pool.size() ); i++ )
+    copy->execute_on_target( pool[ i ] );
+}
+
+void druid_t::on_swiftmend_or_wild_growth( player_t* t )
+{
+  if ( talent.implant.ok() && active.symbiotic_blooms )
+    active.symbiotic_blooms->execute_on_target( t );
+
+  if ( grove_guardians_cd && grove_guardians_cd->up() )
+  {
+    grove_guardians_cd->start();
+    summon_grove_guardian();
+  }
+}
+
+// A Grove Guardian treant casts Nourish on the most injured ally until it fades.
+void druid_t::summon_grove_guardian()
+{
+  auto lasts = find_spell( 102693 )->duration();
+  auto cast  = find_spell( 422090 )->cast_time();
+  auto end   = sim->current_time() + lasts;
+
+  struct cast_t
+  {
+    static void next( druid_t* p, timespan_t cast, timespan_t end )
+    {
+      auto wait = cast * p->cache.spell_cast_speed();
+      if ( p->sim->current_time() + wait > end )
+        return;
+      make_event( *p->sim, wait, [ p, cast, end ] {
+        auto heal = static_cast<heal_t*>( p->active.grove_nourish );
+        if ( auto t = heal->pick_target() )
+          heal->execute_on_target( t );
+        next( p, cast, end );
+      } );
+    }
+  };
+  cast_t::next( this, cast, end );
+}
+
 void druid_t::reset()
 {
   player_t::reset();
@@ -13064,6 +13519,9 @@ void druid_t::reset()
   halazzis_fury_duration = 0_ms;
   red_moon_target = nullptr;
   rampant_thorn_berserk_extension = 0_ms;
+  efflo_expires = 0_ms;
+  lifebloom_target = nullptr;
+  lifebloom_applied = 0_ms;
   dot_lists.moonfire.clear();
   dot_lists.sunfire.clear();
   dot_lists.rake.clear();
