@@ -15,8 +15,14 @@ MAGE=../../profiles/MID2/MID2_Mage_Arcane.simc
 sim() {  # sim <out name> <simc args...>: prints the result and the seconds taken
   local name=$1; shift
   local t0=$(date +%s.%N)
-  if ! "$SIMC" "$@" json2="$OUT/$name.json" > "$OUT/$name.txt" 2>&1; then
-    tail -5 "$OUT/$name.txt" >&2; return 1
+  "$SIMC" "$@" json2="$OUT/$name.json" > "$OUT/$name.txt" 2>&1
+  local code=$?
+  if (( code != 0 )); then
+    # what went wrong: a checker's report from its first line, or the end of the output
+    echo "    exit code $code$( (( code > 128 )) && echo " (signal $((code - 128)))" )" >&2
+    local first=$(grep -nE 'runtime error|ERROR: AddressSanitizer|^Error' "$OUT/$name.txt" | head -1 | cut -d: -f1)
+    if [[ -n "$first" ]]; then sed -n "${first},$((first + 25))p" "$OUT/$name.txt" >&2; else tail -8 "$OUT/$name.txt" >&2; fi
+    return 1
   fi
   python3 - "$OUT/$name.json" "$t0" <<'PY'
 import json, sys, time
