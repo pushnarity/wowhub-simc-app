@@ -906,7 +906,7 @@ public:
 
     // Time in seconds between prayer of mending bounces
     double prayer_of_mending_bounce_rate = 2;
-    int holy_heal_pool = 4;  // wowhub: Holy single-target heals pick among the N most injured
+    int holy_heal_pool = 20;  // wowhub: Holy single-target heals pick among the N most injured
 
     // Option whether or not to start with higher than 0 Insanity based on talents
     // Only takes into account if you have not overriden initial_resource=insanity=X to something greater than 0
