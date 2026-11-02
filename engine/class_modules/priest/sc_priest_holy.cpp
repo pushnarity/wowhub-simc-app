@@ -51,10 +51,7 @@ struct holy_word_sanctify_t final : public priest_heal_t
   {
     priest_heal_t::execute();
 
-    if ( priest().talents.holy.eternal_sanctity.enabled() )
-    {
-      priest().buffs.apotheosis->extend_duration( priest().talents.holy.eternal_sanctity->effectN( 1 ).time_value() );
-    }
+    // wowhub: Eternal Sanctity now lengthens Apotheosis itself (spell data modifies the buff duration)
 
     if ( priest().talents.holy.divine_image.enabled() )
     {
@@ -72,6 +69,7 @@ struct holy_word_serenity_t final : public priest_heal_t
     parse_options( options_str );
     harmful      = false;
     holy_mastery = true;
+    target_pool  = p.options.holy_heal_pool;
   }
 
   double cost() const override
@@ -88,10 +86,7 @@ struct holy_word_serenity_t final : public priest_heal_t
   {
     priest_heal_t::execute();
 
-    if ( priest().talents.holy.eternal_sanctity.enabled() )
-    {
-      priest().buffs.apotheosis->extend_duration( priest().talents.holy.eternal_sanctity->effectN( 1 ).time_value() );
-    }
+    // wowhub: Eternal Sanctity now lengthens Apotheosis itself (spell data modifies the buff duration)
 
     if ( priest().talents.holy.divine_image.enabled() )
     {
@@ -185,6 +180,11 @@ struct holy_renew_t final : public priest_heal_t
     return priest_heal_t::composite_ta_multiplier( s ) * ( 1.0 + p().cache.mastery_value() );
   }
 
+  double cost() const override
+  {
+    return 0;
+  }
+
   void apply( player_t* t, timespan_t base_duration )
   {
     double mult = 1.0;
@@ -217,6 +217,73 @@ struct pom_shield_t final : public priest_absorb_t
   }
 };
 
+// Divine Hymn: a channel that heals everyone each pulse; every pulse stacks +4% healing taken on all allies
+struct divine_hymn_pulse_t final : public priest_heal_t
+{
+  divine_hymn_pulse_t( priest_t& p ) : priest_heal_t( "divine_hymn_pulse", p, p.find_spell( 64844 ) )
+  {
+    background = true;
+    harmful      = false;
+    auto_target  = false;
+    holy_mastery = true;
+    aoe          = -1;
+  }
+
+  // the spell data coefficient is the whole channel's worth; a pulse is a fifth (logs: ~0.9 per pulse)
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    return priest_heal_t::composite_da_multiplier( s ) * 0.2;
+  }
+};
+
+struct divine_hymn_t final : public priest_heal_t
+{
+  divine_hymn_pulse_t* pulse;
+
+  divine_hymn_t( priest_t& p, util::string_view options_str )
+    : priest_heal_t( "divine_hymn", p, p.find_spell( 64843 ) ), pulse( new divine_hymn_pulse_t( p ) )
+  {
+    parse_options( options_str );
+    harmful       = false;
+    channeled     = true;
+    tick_zero     = true;
+    hasted_ticks  = true;
+    dot_duration  = data().duration();
+    base_tick_time = timespan_t::from_millis( 1250 );
+    add_child( pulse );
+  }
+
+  void execute() override
+  {
+    priest().hymn_stacks = 0;
+    priest_heal_t::execute();
+  }
+
+  void tick( dot_t* d ) override
+  {
+    priest_heal_t::tick( d );
+    auto inj = holy_injured_allies( p(), nullptr, 1 );
+    if ( !inj.empty() )
+      pulse->execute_on_target( inj[ 0 ] );
+    p().hymn_stacks     = std::min( 5, p().hymn_stacks + 1 );
+    p().hymn_until      = sim->current_time() + 15_s;
+    if ( p().talents.holy.gales_of_song.enabled() )
+    {
+      int stacks = as<int>( p().talents.holy.gales_of_song->effectN( 2 ).base_value() );
+      size_t n   = as<size_t>( p().talents.holy.gales_of_song->effectN( 3 ).base_value() );
+      for ( auto* t : holy_injured_allies( p(), nullptr, 8 ) )
+      {
+        if ( n == 0 )
+          break;
+        p().trigger_prayer_of_mending( t, stacks );
+        n--;
+      }
+    }
+    if ( p().talents.holy.benediction_serenity.enabled() )
+      p().trigger_cosmic_ripple( p().talents.holy.benediction_serenity->effectN( 1 ).percent() );
+  }
+};
+
 struct holy_prayer_of_mending_t final : public priest_heal_t
 {
   holy_prayer_of_mending_t( priest_t& p, util::string_view options_str )
@@ -224,6 +291,13 @@ struct holy_prayer_of_mending_t final : public priest_heal_t
   {
     parse_options( options_str );
     harmful = false;
+  }
+
+  // wowhub: the ward goes on one of the few most injured allies, not always the same one
+  player_t* pick_target() override
+  {
+    auto inj = holy_injured_allies( p(), nullptr, 5 );
+    return inj.empty() ? priest_heal_t::pick_target() : inj[ rng().range( inj.size() ) ];
   }
 
   void execute() override
@@ -532,10 +606,7 @@ struct holy_word_chastise_t final : public priest_spell_t
   {
     priest_spell_t::execute();
 
-    if ( priest().talents.holy.eternal_sanctity.enabled() )
-    {
-      priest().buffs.apotheosis->extend_duration( priest().talents.holy.eternal_sanctity->effectN( 1 ).time_value() );
-    }
+    // wowhub: Eternal Sanctity now lengthens Apotheosis itself (spell data modifies the buff duration)
 
     if ( priest().talents.holy.divine_image.enabled() )
     {
@@ -730,20 +801,14 @@ void priest_t::init_spells_holy()
   talents.holy.divine_favor_chastise       = find_spell( 372761 );
   talents.holy.epiphany                    = ST( "Epiphany" );
 
-  // wowhub: Benediction is three talent nodes with one name
-  for ( unsigned i = 0; i < 3; i++ )
-  {
-    auto t = find_talent_spell( talent_tree::SPECIALIZATION, "Benediction", i );
-    if ( !t.ok() )
-      continue;
-    switch ( t->id() )
-    {
-      case 1262755: talents.holy.benediction_pom = t; break;
-      case 1262758: talents.holy.benediction_ripple = t; break;
-      case 1262760: talents.holy.benediction_serenity = t; break;
-      default: break;
-    }
-  }
+  // wowhub: Benediction is one node with three choices that are all taken
+  talents.holy.benediction_pom      = find_talent_spell( 136995u );
+  talents.holy.benediction_ripple   = find_talent_spell( 136994u );
+  talents.holy.benediction_serenity = find_talent_spell( 136993u );
+  sim->print_debug( "{} Benediction nodes: pom={} (id {}) ripple={} (id {}) serenity={} (id {})", *this,
+                    talents.holy.benediction_pom.enabled(), talents.holy.benediction_pom->id(),
+                    talents.holy.benediction_ripple.enabled(), talents.holy.benediction_ripple->id(),
+                    talents.holy.benediction_serenity.enabled(), talents.holy.benediction_serenity->id() );
   talents.holy.lights_resurgence = find_talent_spell( talent_tree::SPECIALIZATION, 193157 );
 
   // General Spells
@@ -778,6 +843,10 @@ action_t* priest_t::create_action_holy( util::string_view name, util::string_vie
   if ( name == "guardian_spirit" )
   {
     return new guardian_spirit_t( *this, options_str );
+  }
+  if ( name == "divine_hymn" && specialization() == PRIEST_HOLY )
+  {
+    return new divine_hymn_t( *this, options_str );
   }
   if ( name == "prayer_of_mending" && specialization() == PRIEST_HOLY )
   {
@@ -926,11 +995,12 @@ void priest_t::apl_holy_heal()
   default_->add_action( "use_item,slot=trinket2,if=!variable.trinket_2_ogcd_cast" );
   default_->add_action( "use_item,use_off_gcd=1,slot=trinket1,if=variable.trinket_1_ogcd_cast&gcd.remains>=0.75*gcd.max" );
   default_->add_action( "use_item,use_off_gcd=1,slot=trinket2,if=variable.trinket_2_ogcd_cast&gcd.remains>=0.75*gcd.max" );
-  default_->add_action( "apotheosis" );
+  default_->add_action( "divine_hymn,if=group_size>=10&time>15" );
+  default_->add_action( "apotheosis,if=cooldown.holy_word_serenity.charges_fractional<1.5" );
   default_->add_action( "holy_word_serenity" );
   default_->add_action( "prayer_of_mending" );
   default_->add_action( "benediction" );
-  default_->add_action( "flash_heal" );
+  default_->add_action( "flash_heal,if=mana.pct>=80*fight_remains%(time+fight_remains)" );
 }
 
 }  // namespace priestspace

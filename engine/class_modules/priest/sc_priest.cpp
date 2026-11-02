@@ -1756,6 +1756,9 @@ struct flash_heal_t final : public priest_heal_t
     disc_mastery = true;
     holy_mastery = true;
 
+    if ( p.specialization() == PRIEST_HOLY && !binding )
+      target_pool = p.options.holy_heal_pool;
+
     if ( binding )
     {
       background = proc = true;
@@ -2527,8 +2530,8 @@ struct prayer_of_mending_t final : public priest_heal_t
          rng().roll( p().talents.holy.lights_resurgence->effectN( 1 ).percent() ) )
       p().trigger_holy_renew( s->target, 0_s );
 
-    if ( p().talents.holy.benediction_pom.enabled() &&
-         rng().roll( p().talents.holy.benediction_pom->effectN( 1 ).percent() ) )
+    // wowhub: the upgrade rolls on about 12% of Prayer of Mending hits in logs (data says 30%)
+    if ( p().talents.holy.benediction_pom.enabled() && rng().roll( 0.123 ) )
       p().buffs.benediction->trigger();
   }
 };
@@ -4340,6 +4343,7 @@ void priest_t::create_options()
   add_option( opt_bool( "priest.mindgames_damage_reversal", options.mindgames_damage_reversal ) );
   add_option( opt_bool( "priest.self_power_infusion", options.self_power_infusion ) );
   // Default is 2, minimum of 1 bounce per second, maximum of 1 bounce per 12 seconds (prayer of mending's cooldown)
+  add_option( opt_int( "priest.holy_heal_pool", options.holy_heal_pool, 1, 20 ) );
   add_option( opt_float( "priest.prayer_of_mending_bounce_rate", options.prayer_of_mending_bounce_rate, 1, 12 ) );
   add_option( opt_bool( "priest.init_insanity", options.init_insanity ) );
   add_option( opt_float( "priest.twist_of_fate_heal_rppm", options.twist_of_fate_heal_rppm, 0, 120 ) );
@@ -4494,6 +4498,15 @@ void priest_t::prayer_of_mending_hurt( player_t* target )
   }
   if ( next.empty() )
     return;
+  // wowhub: the ward jumps to a hurt ally (Holy: one of the four most injured), not to just anyone
+  if ( specialization() == PRIEST_HOLY )
+  {
+    size_t k = std::min<size_t>( 4, next.size() );
+    std::partial_sort( next.begin(), next.begin() + k, next.end(), []( player_t* a, player_t* b ) {
+      return a->resources.pct( RESOURCE_HEALTH ) < b->resources.pct( RESOURCE_HEALTH );
+    } );
+    next.resize( k );
+  }
   player_t* to = next[ rng().range( next.size() ) ];
   make_event( *sim, 300_ms, [ this, to, left ] { trigger_prayer_of_mending( to, left ); } );
 }

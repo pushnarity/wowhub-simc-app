@@ -870,6 +870,8 @@ public:
 
   // Player Data State
   vector_with_callback<player_t*> allies_with_atonement;
+  int hymn_stacks = 0;                 // wowhub: Divine Hymn healing-taken stacks
+  timespan_t hymn_until = 0_s;
   double piety_pool = 0;  // wowhub: overhealing waiting to be redistributed this instant
   struct state_t
   {
@@ -904,6 +906,7 @@ public:
 
     // Time in seconds between prayer of mending bounces
     double prayer_of_mending_bounce_rate = 2;
+    int holy_heal_pool = 4;  // wowhub: Holy single-target heals pick among the N most injured
 
     // Option whether or not to start with higher than 0 Insanity based on talents
     // Only takes into account if you have not overriden initial_resource=insanity=X to something greater than 0
@@ -1446,6 +1449,7 @@ struct priest_heal_t : public priest_action_t<heal_t>
   bool piety_source;    // wowhub: overhealing feeds Piety
   bool atonement_heal;  // wowhub: Atonement feeds Piety only when it crits
   bool smart_aoe = false;  // wowhub: area heals reach the most injured allies first
+  int target_pool = 1;     // wowhub: single-target heals go to one of the N most injured allies (players overheal)
 
   priest_heal_t( util::string_view name, priest_t& player, const spell_data_t* s = spell_data_t::nil() )
     : base_t( name, player, s ), disc_mastery( false ), holy_mastery( false ), divine_aegis( true ),
@@ -1478,6 +1482,41 @@ struct priest_heal_t : public priest_action_t<heal_t>
     }
 
     return ctm;
+  }
+
+  player_t* pick_target() override
+  {
+    if ( target_pool > 1 && sim->heal_target )
+    {
+      std::vector<player_t*> v;
+      for ( auto* t : sim->healing_no_pet_list )
+        if ( !t->is_sleeping() && target_ready( t ) )
+          v.push_back( t );
+      size_t n = std::min<size_t>( as<size_t>( target_pool ), v.size() );
+      if ( n > 0 )
+      {
+        std::partial_sort( v.begin(), v.begin() + n, v.end(), []( player_t* a, player_t* b ) {
+          return a->resources.pct( RESOURCE_HEALTH ) < b->resources.pct( RESOURCE_HEALTH );
+        } );
+        return v[ rng().range( n ) ];
+      }
+    }
+    return base_t::pick_target();
+  }
+
+  // wowhub: Renewed Faith - the priest's healing on allies with her Renew is increased
+  double composite_target_multiplier( player_t* t ) const override
+  {
+    double m = base_t::composite_target_multiplier( t );
+    if ( p().hymn_stacks > 0 && p().hymn_until > sim->current_time() )
+      m *= 1.0 + 0.04 * p().hymn_stacks;
+    if ( p().talents.holy.renewed_faith.enabled() )
+    {
+      auto* tdata = p().find_target_data( t );
+      if ( tdata && tdata->dots.renew && tdata->dots.renew->is_ticking() )
+        m *= 1.0 + p().talents.holy.renewed_faith->effectN( 1 ).percent();
+    }
+    return m;
   }
 
   size_t available_targets( std::vector<player_t*>& target_list ) const override
@@ -1516,7 +1555,8 @@ struct priest_heal_t : public priest_action_t<heal_t>
     {
       if ( priest().specialization() == PRIEST_HOLY && holy_mastery )
       {
-        // wowhub: Warcraft Logs - Echo of Light is mastery x the EFFECTIVE healing (overhealing makes none)
+        // wowhub: Warcraft Logs - Echo of Light is about 0.56 x the EFFECTIVE healing of the spells it follows
+        // (raw Echo 47.5M vs 83M effective); overhealing on the source makes no echo
         residual_action::trigger( p().background_actions.echo_of_light, s->target,
                                   ( sim->heal_target ? s->result_amount : s->result_total ) * p().composite_mastery_value() );
       }
