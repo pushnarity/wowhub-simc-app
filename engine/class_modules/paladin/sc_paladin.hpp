@@ -779,6 +779,7 @@ public:
     double reflection_of_radiance_proc_chance_sacred_weapon = .1;
     double reflection_of_radiance_proc_chance_holy_bulwark  = .2;
     std::string starting_armament                           = "holy_bulwark";
+    std::string holy_tune;  // wowhub: name=value/name=value fits for the Holy healing model
     bool max_range_apex                                     = false;
   } options;
   player_t* beacon_target;
@@ -919,6 +920,7 @@ public:
   action_t* create_action_holy_heal( util::string_view name, util::string_view options_str );
   void apl_holy_heal();
   double savior_shield_amount() const;
+  double bulwark_heal_scale() const;
 
   void apply_action_effects( action_t* a );
   void apply_target_action_effects( action_t* a );
@@ -1005,6 +1007,7 @@ struct holy_bulwark_absorb_t : public absorb_buff_t
     }
     total_value = std::min( total_value, this->player->resources.max[ RESOURCE_HEALTH ] *
                                              caster->spells.lightsmith.holy_bulwark->effectN( 5 ).percent() );
+    total_value *= caster->bulwark_heal_scale();  // wowhub: 1.0 outside healing sims
     return absorb_buff_t::trigger( stacks, total_value, chance, duration );
   }
   void absorb_used( double absorbed, player_t* source ) override
