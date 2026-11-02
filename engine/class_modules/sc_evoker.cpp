@@ -64,6 +64,7 @@ static const spelleffect_data_t& find_effect( T val, U type, Ts&&... args )
 
 // Forward declarations
 struct evoker_t;
+struct pres_state_t;  // wowhub
 struct simplified_player_t;
 
 namespace pets
@@ -1818,6 +1819,13 @@ struct evoker_t : public player_t
   void validate_sim_options() override;
   unsigned int specialization_aura_id();
   void init_action_list() override;
+  // wowhub: Preservation healing for healing sims (sc_evoker_preservation_heal.inc)
+  pres_state_t* pres = nullptr;
+  bool pres_heal_mode() const;
+  void init_pres_heal();
+  void create_pres_heal_actions();
+  action_t* create_action_pres_heal( std::string_view name, std::string_view options_str );
+  void apl_pres_heal();
   void init_blizzard_action_list() override;
   parsed_assisted_combat_rule_t parse_assisted_combat_rule( const assisted_combat_rule_data_t& rule,
                                                             const assisted_combat_step_data_t& step ) const override;
@@ -9277,8 +9285,19 @@ unsigned int evoker_t::specialization_aura_id()
   }
 }
 
+#include "sc_evoker_preservation_heal.inc"  // wowhub
+
 void evoker_t::init_action_list()
 {
+  if ( pres_heal_mode() )  // wowhub
+  {
+    clear_action_priority_lists();
+    apl_pres_heal();
+    use_default_action_list = true;
+    player_t::init_action_list();
+    return;
+  }
+
   // 2022-08-07: Healing is not supported
   if ( !sim->allow_experimental_specializations && primary_role() == ROLE_HEAL )
   {
@@ -10029,7 +10048,7 @@ void evoker_t::init_background_actions()
     background_actions.tip_the_scales = get_secondary_action<spells::tip_the_scales_t>( "tip_the_scales", "" );
   }
 
-  if ( talent.flameshaper.consume_flame.ok() )
+  if ( talent.flameshaper.consume_flame.ok() && !pres_heal_mode() )  // wowhub
   {
     background_actions.consume_flame = get_secondary_action<spells::consume_flame_t>( "consume_flame" );
   }
@@ -10483,10 +10502,13 @@ void evoker_t::create_actions()
     action.essence_bomb = get_secondary_action<essence_bomb_t>( "essence_bomb" );
   }
 
-  if ( talent.flameshaper.twin_flame.enabled() )
+  if ( talent.flameshaper.twin_flame.enabled() && !pres_heal_mode() )  // wowhub
   {
     action.twin_flame = get_secondary_action<twin_flame_t>( "twin_flame" );
   }
+
+  if ( pres_heal_mode() )  // wowhub
+    create_pres_heal_actions();
 
   player_t::create_actions();
 }
@@ -11054,6 +11076,10 @@ action_t* evoker_t::create_action( std::string_view name, std::string_view optio
 {
   using namespace spells;
 
+  if ( pres_heal_mode() )  // wowhub
+    if ( action_t* a = create_action_pres_heal( name, options_str ) )
+      return a;
+
   if ( name == "azure_strike" )
     return new azure_strike_t( this, options_str );
   if ( name == "azure_sweep" )
@@ -11120,6 +11146,16 @@ std::unique_ptr<expr_t> evoker_t::create_expression( std::string_view expr_str )
 
   if ( util::str_compare_ci( expr_str, "essense" ) || util::str_compare_ci( expr_str, "essences" ) )
     return make_ref_expr( expr_str, resources.current[ RESOURCE_ESSENCE ] );
+
+  if ( util::str_compare_ci( expr_str, "echoed_allies" ) )  // wowhub: allies carrying my Echo
+    return make_fn_expr( expr_str, [ this ] {
+      int n = 0;
+      if ( pres )
+        for ( auto& [ t, b ] : pres->echo )
+          if ( b->check() && !t->is_sleeping() )
+            n++;
+      return n;
+    } );
 
   if ( splits.size() >= 2 )
   {

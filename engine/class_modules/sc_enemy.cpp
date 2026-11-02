@@ -1276,11 +1276,14 @@ struct heal_enemy_t : public enemy_t
   void hurt( double share )
   {
     double amount = share * resources.max[ RESOURCE_HEALTH ] * sim->heal_damage_scale * ( active ? active->intensity : 1.0 );
+    double raw_amount = amount;  // wowhub
     // shields soak the hit first, so absorbs count as healing like in a log
     for ( auto* b : absorb_buff_list )
       if ( amount > 0 && b->check() )
         amount -= b->consume( amount );
     resources.current[ RESOURCE_HEALTH ] = std::max( 1.0, resources.current[ RESOURCE_HEALTH ] - amount );
+    for ( auto& cb : sim->heal_damage_callbacks )  // wowhub
+      cb( this, raw_amount );
     for ( auto& cb : sim->heal_hurt_callbacks )
       cb( this );
   }
@@ -1288,10 +1291,13 @@ struct heal_enemy_t : public enemy_t
   // absolute damage from a replayed fight, shields first
   void hurt_amount( double amount )
   {
+    double raw_amount = amount;  // wowhub
     for ( auto* b : absorb_buff_list )
       if ( amount > 0 && b->check() )
         amount -= b->consume( amount );
     resources.current[ RESOURCE_HEALTH ] = std::max( 1.0, resources.current[ RESOURCE_HEALTH ] - amount );
+    for ( auto& cb : sim->heal_damage_callbacks )  // wowhub
+      cb( this, raw_amount );
     for ( auto& cb : sim->heal_hurt_callbacks )
       cb( this );
   }
