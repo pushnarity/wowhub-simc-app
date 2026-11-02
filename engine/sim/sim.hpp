@@ -587,6 +587,8 @@ struct sim_t : private sc_thread_t
   // called whenever incoming damage lands on a healing target (or a replayed hit on the healer), for
   // "the next time they take damage" heals like Prayer of Mending
   std::vector<std::function<void( player_t* )>> heal_hurt_callbacks;
+  // wowhub: the same moment with the damage (before shields), for "healed from damage taken" effects
+  std::vector<std::function<void( player_t*, double )>> heal_damage_callbacks;
   double dhaps_healing_weight;
   double scaling_normalized;
   bool merge_enemy_priority_dmg;
