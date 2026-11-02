@@ -10652,11 +10652,13 @@ std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
 
 void shaman_t::create_actions()
 {
+  if ( resto_heal_mode() )  // wowhub: the healing state exists before the action list builds any action
+    init_resto_heal();
+
   parse_player_effects_t::create_actions();
 
   if ( resto_heal_mode() )  // wowhub
   {
-    init_resto_heal();
     create_resto_heal_actions();
     return;
   }

@@ -618,7 +618,8 @@ struct dawnlight_heal_t : public hpal_heal_t
     for ( auto* t : st.injured( as<size_t>( p()->spells.herald_of_the_sun.dawnlight_aoe_metadata->effectN( 2 ).base_value() ),
                                 d->target ) )
       st.dawnlight_radiate->execute_on_target( t, radiate );
-    if ( full && p()->talents.herald_of_the_sun.endless_gleam->ok() )
+    // not on the last tick: the dot is already ending and has no end event to move
+    if ( full && p()->talents.herald_of_the_sun.endless_gleam->ok() && d->end_event )
       d->adjust_duration( timespan_t::from_millis( p()->talents.herald_of_the_sun.endless_gleam->effectN( 1 ).base_value() ) );
     // Sun's Avatar: allies crossing the beams between the paladin and each Dawnlight (about 6 a tick in logs)
     if ( st.suns_avatar )

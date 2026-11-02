@@ -708,7 +708,6 @@ struct healing_stream_totem_t : public spell_t
     parse_options( options_str );
     harmful = false;
     may_miss = may_crit = false;
-    auto& s = *pl->rh;
     if ( storm )
     {
       cooldown = pl->get_cooldown( "stormstream_totem_free" );
