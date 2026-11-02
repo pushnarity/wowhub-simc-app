@@ -1216,8 +1216,10 @@ struct heal_enemy_t : public enemy_t
 
   static const profile_t* profile( util::string_view name )
   {
-    static const profile_t raid = { 0.010, 2.0, 0.22, 0.32, 15.0, 25.0, 0.15, 0.30, 4.0,
-                                    0.030, 0.050, 1.5, 0.40, 30.0, 40.0, 0.10, 2, 0.84 };
+    // raid follows real Heroic pulls: most of the raid takes damage every second (~3.5% of health a second
+    // in all), so all seven healers land within about 10% of their own log replays
+    static const profile_t raid = { 0.020, 1.0, 0.06, 0.10, 3.0, 5.0, 0.15, 0.30, 4.0,
+                                    0.020, 0.040, 1.5, 0.40, 30.0, 40.0, 0.10, 2, 0.8 };
     static const profile_t dungeon = { 0.010, 2.0, 0.18, 0.28, 12.0, 20.0, 0.18, 0.30, 6.0,
                                        0.040, 0.070, 1.5, 0.35, 20.0, 30.0, 0.03, 1, 1.4 };
     if ( name == "raid" )
@@ -1272,6 +1274,7 @@ struct heal_enemy_t : public enemy_t
   }
 
   const profile_t* active = nullptr;
+  profile_t custom = {};
 
   void hurt( double share )
   {
@@ -1395,6 +1398,20 @@ struct heal_enemy_t : public enemy_t
     }
 
     const profile_t* pr = profile( profile_name() );
+    // heal_damage_profile=<18 numbers, comma-separated, in profile_t order> tries a profile without a rebuild
+    if ( !pr && sim->heal_damage_profile.find( ',' ) != std::string::npos )
+    {
+      auto v = util::string_split<std::string_view>( sim->heal_damage_profile, "," );
+      if ( v.size() == 18 )
+      {
+        double* f = &custom.ambient;
+        for ( size_t i = 0; i < 16; i++ )
+          f[ i ] = util::to_double( v[ i ] );
+        custom.tanks     = util::to_int( v[ 16 ] );
+        custom.intensity = util::to_double( v[ 17 ] );
+        pr = &custom;
+      }
+    }
     sim->print_log( "{} healing profile '{}'", *this, pr ? profile_name() : "none" );
     if ( !pr )
       return;
