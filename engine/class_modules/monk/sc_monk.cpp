@@ -5319,6 +5319,9 @@ void monk_t::parse_player_effects()
 action_t *monk_t::create_action( std::string_view name, std::string_view options_str )
 {
   using namespace actions;
+  if ( mw_heal_mode() )  // wowhub
+    if ( action_t *a = create_action_mw_heal( name, options_str ) )
+      return a;
   // Monk
   if ( name == "snapshot_stats" )
     return new monk_snapshot_stats_t( this, options_str );
@@ -5437,6 +5440,9 @@ void monk_t::trigger_celestial_fortune( action_state_t *s )
 
 bool monk_t::validate_actor()
 {
+  if ( mw_heal_mode() )  // wowhub
+    return true;
+
   if ( specialization() == MONK_MISTWEAVER )
   {
     if ( !quiet )
@@ -6114,6 +6120,10 @@ void monk_t::init_base_stats()
     case MONK_BREWMASTER:
       base.attack_power_per_agility              = 1.0;
       resources.active_resource[ RESOURCE_MANA ] = false;
+      break;
+    case MONK_MISTWEAVER:  // wowhub
+      if ( mw_heal_mode() )
+        base.spell_power_per_intellect = 1.0;
       break;
     case MONK_WINDWALKER:
       if ( base.distance < 1 )
@@ -6989,6 +6999,7 @@ void monk_t::init_finished()
 void monk_t::reset()
 {
   base_t::reset();
+  mw_heal_reset();  // wowhub
 
   combo_strike_actions.clear();
 
@@ -7076,6 +7087,7 @@ void monk_t::create_options()
 {
   base_t::create_options();
 
+  add_option( opt_string( "mw_tune", mw_tune ) );  // wowhub: name=value/name=value fits for the healing model
   add_option( opt_int( "monk.initial_chi", user_options.initial_chi, 0, 6 ) );
   add_option( opt_int( "monk.chi_burst_healing_targets", user_options.chi_burst_healing_targets, 0, 30 ) );
 
@@ -7092,6 +7104,8 @@ void monk_t::copy_from( player_t *source )
 
 resource_e monk_t::primary_resource() const
 {
+  if ( mw_heal_mode() )  // wowhub
+    return RESOURCE_MANA;
   return RESOURCE_ENERGY;
 }
 
@@ -7308,8 +7322,16 @@ void monk_t::assess_heal( school_e school, result_amount_type dmg_type, action_s
 void monk_t::create_actions()
 {
   base_t::create_actions();
+  if ( mw_heal_mode() )  // wowhub
+  {
+    init_mw_heal();
+    create_mw_heal_actions();
+    return;
+  }
   buff.aspect_of_harmony.construct_actions( this );
 }
+
+#include "sc_monk_mistweaver_heal.inc"  // wowhub
 
 namespace profileset_control
 {
@@ -7387,6 +7409,9 @@ void valid_talents_t::create_options()
 
 std::unique_ptr<expr_t> monk_t::create_expression( std::string_view name_str )
 {
+  if ( mw_heal_mode() )  // wowhub
+    if ( auto e = create_expression_mw_heal( name_str ) )
+      return e;
   auto splits = util::string_split<std::string_view>( name_str, "." );
 
   if ( splits.size() >= 3 && splits[ 1 ] == "celestial_brew" && talent.brewmaster.celestial_infusion->ok() )

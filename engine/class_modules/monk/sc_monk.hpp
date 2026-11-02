@@ -1172,6 +1172,17 @@ public:
   bool validate_actor() override;
   bool validate_fight_style( fight_style_e style ) const override;
 
+  // wowhub healing sims (sc_monk_mistweaver_heal.inc)
+  struct mw_heal_state_t *mw = nullptr;
+  std::string mw_tune;
+  bool mw_heal_mode() const;
+  void init_mw_heal();
+  void create_mw_heal_actions();
+  action_t *create_action_mw_heal( std::string_view name, std::string_view options );
+  void apl_mw_heal();
+  void mw_heal_reset();
+  std::unique_ptr<expr_t> create_expression_mw_heal( std::string_view name );
+
   // Init / Reset
   void init_spells() override;
   void init_background_actions() override;
