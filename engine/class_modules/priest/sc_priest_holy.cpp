@@ -98,6 +98,138 @@ struct holy_word_serenity_t final : public priest_heal_t
       priest().buffs.divine_image->trigger();
       priest().procs.divine_image->occur();
     }
+
+    // wowhub: Ultimate Serenity, Lasting Words, Cosmic Ripple (Serenity coming off cooldown), Benediction
+    priest().holy_serenity_extras( target );
+  }
+};
+
+// ==========================================================================
+// wowhub: Holy healing sims
+// ==========================================================================
+std::vector<player_t*> holy_injured_allies( const priest_t& p, player_t* exclude, size_t n )
+{
+  std::vector<player_t*> v;
+  for ( auto* t : p.sim->healing_no_pet_list )
+    if ( t != exclude && !t->is_sleeping() )
+      v.push_back( t );
+  n = std::min( n, v.size() );
+  std::partial_sort( v.begin(), v.begin() + n, v.end(), []( player_t* a, player_t* b ) {
+    return a->resources.pct( RESOURCE_HEALTH ) < b->resources.pct( RESOURCE_HEALTH );
+  } );
+  v.resize( n );
+  return v;
+}
+
+struct cosmic_ripple_t final : public priest_heal_t
+{
+  double scale = 1.0;
+
+  cosmic_ripple_t( priest_t& p ) : priest_heal_t( "cosmic_ripple", p, p.find_spell( 243241 ) )
+  {
+    background = true;
+    harmful    = false;
+    auto_target  = false;
+    holy_mastery = true;
+    smart_aoe    = true;
+    aoe          = std::max( 1, as<int>( p.talents.holy.cosmic_ripple->effectN( 1 ).base_value() ) );
+  }
+
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    return priest_heal_t::composite_da_multiplier( s ) * scale;
+  }
+};
+
+struct dispersing_light_t final : public priest_heal_t
+{
+  int targets;
+
+  dispersing_light_t( priest_t& p )
+    : priest_heal_t( "dispersing_light", p, p.find_spell( 1215266 ) ),
+      targets( std::max( 1, as<int>( p.talents.holy.dispersing_light->effectN( 2 ).base_value() ) ) )
+  {
+    background = proc = true;
+    harmful = false;
+    may_crit = callbacks = false;
+    divine_aegis = false;
+    auto_target  = false;
+    aoe          = 0;
+  }
+
+  void init() override
+  {
+    priest_heal_t::init();
+    snapshot_flags = update_flags = 0;  // a copy of the Flash Heal, no new modifiers
+  }
+
+  void spread( player_t* primary, double raw )
+  {
+    for ( auto* t : holy_injured_allies( p(), primary, as<size_t>( targets ) ) )
+      execute_on_target( t, raw * p().talents.holy.dispersing_light->effectN( 1 ).percent() );
+  }
+};
+
+struct holy_renew_t final : public priest_heal_t
+{
+  holy_renew_t( priest_t& p ) : priest_heal_t( "renew", p, p.find_spell( 139 ) )
+  {
+    background = true;
+    harmful    = false;
+    auto_target = false;
+    aoe         = 0;
+  }
+
+  double composite_ta_multiplier( const action_state_t* s ) const override
+  {
+    return priest_heal_t::composite_ta_multiplier( s ) * ( 1.0 + p().cache.mastery_value() );
+  }
+
+  void apply( player_t* t, timespan_t base_duration )
+  {
+    double mult = 1.0;
+    if ( p().talents.oracle.preemptive_care.enabled() )
+      mult += p().talents.oracle.preemptive_care->effectN( 2 ).percent();
+    dot_duration = base_duration * mult;
+    execute_on_target( t );
+  }
+};
+
+struct simple_holy_heal_t final : public priest_heal_t
+{
+  simple_holy_heal_t( priest_t& p, util::string_view n, unsigned id ) : priest_heal_t( n, p, p.find_spell( id ) )
+  {
+    background = proc = true;
+    harmful      = false;
+    auto_target  = false;
+    holy_mastery = true;
+    aoe          = 0;
+  }
+};
+
+struct pom_shield_t final : public priest_absorb_t
+{
+  pom_shield_t( priest_t& p ) : priest_absorb_t( "power_word_shield_assured_safety", p, p.find_spell( 1246768 ) )
+  {
+    background = proc = true;
+    harmful = false;
+    aoe     = 0;
+  }
+};
+
+struct holy_prayer_of_mending_t final : public priest_heal_t
+{
+  holy_prayer_of_mending_t( priest_t& p, util::string_view options_str )
+    : priest_heal_t( "prayer_of_mending", p, p.find_spell( 33076 ) )
+  {
+    parse_options( options_str );
+    harmful = false;
+  }
+
+  void execute() override
+  {
+    priest_heal_t::execute();
+    priest().holy_pom_cast_extras( target );
   }
 };
 }  // namespace actions::heals
@@ -516,6 +648,8 @@ void priest_t::create_buffs_holy()
 {
   buffs.apotheosis = make_buff( this, "apotheosis", talents.holy.apotheosis )->set_default_value_from_effect( 1, 0.01 );
 
+  buffs.benediction = make_buff( this, "benediction", find_spell( 1262766 ) );
+
   buffs.empyreal_blaze = make_buff( this, "empyreal_blaze", talents.holy.empyreal_blaze_buff )->set_reverse( true );
 
   buffs.divine_favor_chastise = make_buff( this, "divine_favor_chastise", talents.holy.divine_favor_chastise );
@@ -596,6 +730,22 @@ void priest_t::init_spells_holy()
   talents.holy.divine_favor_chastise       = find_spell( 372761 );
   talents.holy.epiphany                    = ST( "Epiphany" );
 
+  // wowhub: Benediction is three talent nodes with one name
+  for ( unsigned i = 0; i < 3; i++ )
+  {
+    auto t = find_talent_spell( talent_tree::SPECIALIZATION, "Benediction", i );
+    if ( !t.ok() )
+      continue;
+    switch ( t->id() )
+    {
+      case 1262755: talents.holy.benediction_pom = t; break;
+      case 1262758: talents.holy.benediction_ripple = t; break;
+      case 1262760: talents.holy.benediction_serenity = t; break;
+      default: break;
+    }
+  }
+  talents.holy.lights_resurgence = find_talent_spell( talent_tree::SPECIALIZATION, 193157 );
+
   // General Spells
   specs.echo_of_light = find_spell( 77489 );
 }
@@ -629,6 +779,10 @@ action_t* priest_t::create_action_holy( util::string_view name, util::string_vie
   {
     return new guardian_spirit_t( *this, options_str );
   }
+  if ( name == "prayer_of_mending" && specialization() == PRIEST_HOLY )
+  {
+    return new holy_prayer_of_mending_t( *this, options_str );
+  }
 
   return nullptr;
 }
@@ -642,11 +796,141 @@ void priest_t::init_background_actions_holy()
   }
 
   background_actions.echo_of_light = new actions::heals::echo_of_light_t( *this );
+
+  if ( holy_heal_mode() )
+  {
+    using namespace actions::heals;
+    if ( talents.holy.cosmic_ripple.enabled() )
+      background_actions.cosmic_ripple = new cosmic_ripple_t( *this );
+    if ( talents.holy.dispersing_light.enabled() )
+      background_actions.dispersing_light = new dispersing_light_t( *this );
+    background_actions.holy_renew = new holy_renew_t( *this );
+    if ( talents.oracle.prompt_prognosis.enabled() )
+      background_actions.prompt_prognosis = new simple_holy_heal_t( *this, "prompt_prognosis", 1246798 );
+    if ( talents.oracle.assured_safety.enabled() )
+      background_actions.pom_shield = new pom_shield_t( *this );
+    if ( talents.holy.ultimate_serenity.enabled() )
+      background_actions.ultimate_serenity = new simple_holy_heal_t( *this, "ultimate_serenity", 1250581 );
+  }
+}
+
+bool priest_t::holy_heal_mode() const
+{
+  return specialization() == PRIEST_HOLY && primary_role() == ROLE_HEAL && sim->heal_target;
+}
+
+void priest_t::trigger_cosmic_ripple( double scale )
+{
+  auto* a = debug_cast<actions::heals::cosmic_ripple_t*>( background_actions.cosmic_ripple.get() );
+  if ( !a )
+    return;
+  auto inj = actions::heals::holy_injured_allies( *this, nullptr, 1 );
+  if ( inj.empty() )
+    return;
+  a->scale = scale;
+  a->execute_on_target( inj[ 0 ] );
+}
+
+void priest_t::trigger_dispersing_light( player_t* primary, double raw )
+{
+  auto* a = debug_cast<actions::heals::dispersing_light_t*>( background_actions.dispersing_light.get() );
+  if ( a )
+    a->spread( primary, raw );
+}
+
+void priest_t::trigger_holy_renew( player_t* target, timespan_t duration )
+{
+  auto* a = debug_cast<actions::heals::holy_renew_t*>( background_actions.holy_renew.get() );
+  if ( !a )
+    return;
+  if ( duration <= 0_s )
+    duration = a->data().duration();
+  a->apply( target, duration );
+}
+
+// Holy Word: Serenity: Ultimate Serenity heals, Lasting Words Renews, Cosmic Ripple
+void priest_t::holy_serenity_extras( player_t* target )
+{
+  if ( !holy_heal_mode() )
+    return;
+
+  if ( background_actions.ultimate_serenity )
+  {
+    for ( auto* t : actions::heals::holy_injured_allies( *this, target, 4 ) )
+    {
+      background_actions.ultimate_serenity->execute_on_target( t );
+      if ( talents.holy.lasting_words.enabled() )
+        trigger_holy_renew( t, timespan_t::from_millis( talents.holy.lasting_words->effectN( 2 ).base_value() ) );
+    }
+  }
+  if ( talents.holy.lasting_words.enabled() )
+    trigger_holy_renew( target, timespan_t::from_millis( talents.holy.lasting_words->effectN( 1 ).base_value() ) );
+
+  if ( talents.holy.cosmic_ripple.enabled() )
+    trigger_cosmic_ripple();
+
+  if ( talents.holy.benediction_serenity.enabled() &&
+       rng().roll( talents.holy.benediction_serenity->effectN( 2 ).percent() ) )
+    buffs.benediction->trigger();
+}
+
+// Prayer of Mending cast: the ward, Twinsight, Prompt Prognosis, Assured Safety, Voice of Harmony
+void priest_t::holy_pom_cast_extras( player_t* target )
+{
+  int stacks = as<int>( find_spell( 33076 )->effectN( 1 ).base_value() );
+  if ( talents.holy.prayers_of_the_virtuous.enabled() )
+    stacks += as<int>( talents.holy.prayers_of_the_virtuous->effectN( 1 ).base_value() );
+  trigger_prayer_of_mending( target, stacks );
+
+  if ( talents.oracle.twinsight.enabled() )
+  {
+    auto inj = actions::heals::holy_injured_allies( *this, target, 3 );
+    if ( !inj.empty() )
+      trigger_prayer_of_mending( inj[ rng().range( inj.size() ) ],
+                                 as<int>( talents.oracle.twinsight->effectN( 1 ).base_value() ) );
+  }
+  if ( background_actions.prompt_prognosis )
+    background_actions.prompt_prognosis->execute_on_target( target );
+  if ( background_actions.pom_shield )
+    background_actions.pom_shield->execute_on_target( target );
+  if ( talents.holy.voice_of_harmony.enabled() )
+    do_holy_word_cdr( cooldowns.holy_word_serenity,
+                      timespan_t::from_seconds( talents.holy.voice_of_harmony->effectN( 2 ).base_value() ) );
 }
 
 expr_t* priest_t::create_expression_holy( action_t*, util::string_view /*name_str*/ )
 {
   return nullptr;
+}
+
+
+// ==========================================================================
+// wowhub: Holy healing priority list
+// ==========================================================================
+void priest_t::apl_holy_heal()
+{
+  action_priority_list_t* default_  = get_action_priority_list( "default" );
+  action_priority_list_t* precombat = get_action_priority_list( "precombat" );
+
+  precombat->add_action( "snapshot_stats" );
+  precombat->add_action( "variable,name=trinket_1_ogcd_cast,value=trinket.1.is.soulcoiler_ritual_vessel" );
+  precombat->add_action( "variable,name=trinket_2_ogcd_cast,value=trinket.2.is.soulcoiler_ritual_vessel" );
+  precombat->add_action( "prayer_of_mending" );
+
+  default_->add_action( "power_infusion" );
+  default_->add_action( "invoke_external_buff,name=power_infusion" );
+  default_->add_action( "potion" );
+  default_->add_action( "desperate_prayer,if=health.pct<=40" );
+  default_->add_action( "arcane_torrent,if=mana.pct<=95" );
+  default_->add_action( "use_item,slot=trinket1,if=!variable.trinket_1_ogcd_cast" );
+  default_->add_action( "use_item,slot=trinket2,if=!variable.trinket_2_ogcd_cast" );
+  default_->add_action( "use_item,use_off_gcd=1,slot=trinket1,if=variable.trinket_1_ogcd_cast&gcd.remains>=0.75*gcd.max" );
+  default_->add_action( "use_item,use_off_gcd=1,slot=trinket2,if=variable.trinket_2_ogcd_cast&gcd.remains>=0.75*gcd.max" );
+  default_->add_action( "apotheosis" );
+  default_->add_action( "holy_word_serenity" );
+  default_->add_action( "prayer_of_mending" );
+  default_->add_action( "benediction" );
+  default_->add_action( "flash_heal" );
 }
 
 }  // namespace priestspace

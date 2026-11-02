@@ -1723,19 +1723,32 @@ struct flash_heal_t final : public priest_heal_t
   flash_heal_t* binding_heals;
   double binding_heal_percent;
   bool binding;
+  bool benediction;  // wowhub: Holy's upgraded Flash Heal
 
   flash_heal_t( priest_t& p, util::string_view options_str ) : flash_heal_t( p, "flash_heal", options_str )
   {
   }
 
+  flash_heal_t( priest_t& p, util::string_view name, util::string_view options_str, bool bind, bool bene )
+    : flash_heal_t( p, name, options_str, bind, bene, 0 )
+  {
+  }
+
   // wowhub: the Shadow Mend talent (1252217) upgrades Flash Heal to Shadow Mend, a bigger and dearer heal
   flash_heal_t( priest_t& p, util::string_view name, util::string_view options_str, bool bind = false )
+    : flash_heal_t( p, name, options_str, bind, false, 0 )
+  {
+  }
+
+  flash_heal_t( priest_t& p, util::string_view name, util::string_view options_str, bool bind, bool bene, int )
     : priest_heal_t( name, p,
-                     !bind && p.talents.discipline.shadow_mend.enabled() ? p.find_spell( 186263 )
-                                                                          : p.find_class_spell( "Flash Heal" ) ),
+                     bene ? p.find_spell( 1262763 )
+                          : !bind && p.talents.discipline.shadow_mend.enabled() ? p.find_spell( 186263 )
+                                                                                 : p.find_class_spell( "Flash Heal" ) ),
       atonement_duration( timespan_t::from_seconds( p.talents.discipline.atonement_buff->effectN( 3 ).base_value() ) ),
       binding_heal_percent( p.talents.binding_heals->effectN( 1 ).percent() ),
-      binding( bind )
+      binding( bind ),
+      benediction( bene )
   {
     parse_options( options_str );
     harmful = false;
@@ -1748,11 +1761,19 @@ struct flash_heal_t final : public priest_heal_t
       background = proc = true;
     }
 
+    binding_heals = nullptr;
     if ( p.talents.binding_heals.enabled() && !binding )
     {
       binding_heals = new flash_heal_t( p, name_str + "_binding", {}, true );
       add_child( binding_heals );
     }
+  }
+
+  bool ready() override
+  {
+    if ( benediction && !priest().buffs.benediction->check() )
+      return false;
+    return priest_heal_t::ready();
   }
 
   void init() override
@@ -1777,14 +1798,20 @@ struct flash_heal_t final : public priest_heal_t
 
     priest().buffs.protective_light->trigger();
 
-    if ( priest().talents.holy.holy_word_serenity.enabled() )
+    if ( benediction )
+    {
+      priest().buffs.benediction->decrement();
+      priest().trigger_cosmic_ripple();
+    }
+
+    if ( priest().talents.holy.holy_word_serenity.enabled() && !binding )
     {
       timespan_t cdr = timespan_t::from_seconds( priest().talents.holy.holy_word_serenity->effectN( 2 ).base_value() );
 
       priest().do_holy_word_cdr( priest().cooldowns.holy_word_serenity, cdr );
     }
 
-    if ( priest().talents.holy.holy_word_sanctify.enabled() && priest().talents.archon.energy_cycle.enabled() )
+    if ( priest().talents.holy.holy_word_sanctify.enabled() && priest().talents.archon.energy_cycle.enabled() && !binding )
     {
       timespan_t cdr = -priest().talents.archon.energy_cycle->effectN( 2 ).time_value();
 
@@ -1810,6 +1837,10 @@ struct flash_heal_t final : public priest_heal_t
       {
         binding_heals->execute_on_target( player, s->result_amount * binding_heal_percent );
       }
+
+      // wowhub: Dispersing Light copies a share of the healing to injured allies
+      if ( priest().background_actions.dispersing_light && !binding && s->result_total > 0 )
+        priest().trigger_dispersing_light( s->target, s->result_total );
     }
   }
 };
@@ -2467,11 +2498,38 @@ struct piety_t final : public priest_heal_t
 // ==========================================================================
 struct prayer_of_mending_t final : public priest_heal_t
 {
-  prayer_of_mending_t( priest_t& p ) : priest_heal_t( "prayer_of_mending", p, p.find_spell( 33110 ) )
+  int bounces_left = 0;
+
+  prayer_of_mending_t( priest_t& p ) : priest_heal_t( "prayer_of_mending_heal", p, p.find_spell( 33110 ) )
   {
     background = proc = true;
     disc_mastery = true;
+    holy_mastery = true;
     auto_target  = false;
+  }
+
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    double m = priest_heal_t::composite_da_multiplier( s );
+    if ( p().talents.holy.divine_service.enabled() )
+      m *= 1.0 + bounces_left * p().talents.holy.divine_service->effectN( 1 ).percent();
+    return m;
+  }
+
+  void impact( action_state_t* s ) override
+  {
+    priest_heal_t::impact( s );
+
+    if ( p().specialization() != PRIEST_HOLY || !result_is_hit( s->result ) )
+      return;
+
+    if ( p().talents.holy.lights_resurgence.enabled() &&
+         rng().roll( p().talents.holy.lights_resurgence->effectN( 1 ).percent() ) )
+      p().trigger_holy_renew( s->target, 0_s );
+
+    if ( p().talents.holy.benediction_pom.enabled() &&
+         rng().roll( p().talents.holy.benediction_pom->effectN( 1 ).percent() ) )
+      p().buffs.benediction->trigger();
   }
 };
 
@@ -2606,6 +2664,7 @@ priest_td_t::priest_td_t( player_t* target, priest_t& p ) : actor_target_data_t(
   dots.void_torrent        = target->get_dot( "void_torrent", &p );
   dots.holy_fire           = target->get_dot( "holy_fire", &p );
   dots.searing_light       = target->get_dot( "searing_light", &p );
+  dots.renew               = target->get_dot( "renew", &p );
 
   buffs.death_and_madness_debuff = make_buff<buffs::death_and_madness_debuff_t>( *this );
 
@@ -3196,6 +3255,10 @@ action_t* priest_t::create_action( util::string_view name, util::string_view opt
   {
     return new flash_heal_t( *this, options_str );
   }
+  if ( name == "benediction" && specialization() == PRIEST_HOLY )
+  {
+    return new flash_heal_t( *this, "benediction", options_str, false, true );
+  }
   if ( name == "void_blast" )
   {
     if ( specialization() == PRIEST_SHADOW )
@@ -3767,7 +3830,7 @@ void priest_t::init_background_actions()
   {
     background_actions.piety = new actions::heals::piety_t( *this );
   }
-  if ( talents.oracle.assured_safety.enabled() )
+  if ( talents.oracle.assured_safety.enabled() || holy_heal_mode() )
   {
     background_actions.prayer_of_mending = new actions::heals::prayer_of_mending_t( *this );
     sim->heal_hurt_callbacks.push_back( [ this ]( player_t* t ) { prayer_of_mending_hurt( t ); } );
@@ -3921,7 +3984,7 @@ void priest_t::init_action_list()
 {
   // 2020-12-31: Healing is outdated and not supported (both discipline and holy)
   if ( !sim->allow_experimental_specializations && primary_role() == ROLE_HEAL &&
-       !( specialization() == PRIEST_DISCIPLINE && sim->heal_target ) )
+       !( ( specialization() == PRIEST_DISCIPLINE || specialization() == PRIEST_HOLY ) && sim->heal_target ) )
   {
     if ( !quiet )
       sim->error( "Role heal for priest '{}' is currently not supported.", name() );
@@ -3956,7 +4019,10 @@ void priest_t::init_action_list()
         priest_apl::discipline( this );
       break;
     case PRIEST_HOLY:
-      priest_apl::holy( this );
+      if ( primary_role() == ROLE_HEAL && sim->heal_target )
+        apl_holy_heal();
+      else
+        priest_apl::holy( this );
       break;
     default:
       priest_apl::no_spec( this );
@@ -4412,6 +4478,7 @@ void priest_t::prayer_of_mending_hurt( player_t* target )
     return;
   int left = td->buffs.prayer_of_mending->check() - 1;
   td->buffs.prayer_of_mending->expire();
+  background_actions.prayer_of_mending->bounces_left = left;
   background_actions.prayer_of_mending->execute_on_target( target );
   if ( left <= 0 )
     return;

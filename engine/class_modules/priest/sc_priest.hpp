@@ -103,6 +103,7 @@ public:
     propagate_const<dot_t*> void_torrent;
     propagate_const<dot_t*> holy_fire;
     propagate_const<dot_t*> searing_light;
+    propagate_const<dot_t*> renew;  // wowhub
   } dots;
 
   struct buffs_t
@@ -204,6 +205,7 @@ public:
     propagate_const<buff_t*> dark_transference;  // MID2 4pc 1307795
     // Holy
     propagate_const<buff_t*> apotheosis;
+    propagate_const<buff_t*> benediction;  // wowhub: the next Flash Heal becomes Benediction
     propagate_const<buff_t*> empyreal_blaze;
     propagate_const<buff_t*> divine_favor_chastise;
     propagate_const<buff_t*> divine_image;
@@ -549,6 +551,10 @@ public:
       player_talent_t lasting_words;
       const spell_data_t* divine_favor_chastise;
       player_talent_t epiphany;
+      player_talent_t benediction_pom;        // wowhub: Prayer of Mending hits may upgrade Flash Heal
+      player_talent_t benediction_ripple;     // wowhub: passive healing and Cosmic Ripple
+      player_talent_t benediction_serenity;   // wowhub: Serenity upgrades Flash Heal, Divine Hymn ripples
+      player_talent_t lights_resurgence;
     } holy;
 
     struct
@@ -841,6 +847,14 @@ public:
     propagate_const<actions::heals::crystalline_reflection_heal_t*> crystalline_reflection_heal;
     propagate_const<actions::heals::crystalline_reflection_damage_t*> crystalline_reflection_damage;
     propagate_const<action_t*> echo_of_light;
+    // wowhub: Holy healing
+    propagate_const<action_t*> cosmic_ripple;
+    propagate_const<action_t*> dispersing_light;
+    propagate_const<action_t*> holy_renew;
+    propagate_const<action_t*> prompt_prognosis;
+    propagate_const<action_t*> pom_shield;
+    propagate_const<action_t*> ultimate_serenity;
+    propagate_const<action_t*> divine_hymn_pulse;
     propagate_const<actions::spells::horrific_vision_t*> horrific_vision;
     propagate_const<actions::spells::vision_of_nzoth_t*> vision_of_nzoth;
     propagate_const<actions::spells::void_bolt_t*> void_bolt;
@@ -1038,6 +1052,13 @@ public:
   void prayer_of_mending_hurt( player_t* target );
   void trigger_unfolding_vision( player_t* from, double amount, bool void_shield );
   void apl_discipline_heal();
+  void apl_holy_heal();
+  bool holy_heal_mode() const;
+  void trigger_cosmic_ripple( double scale = 1.0 );
+  void trigger_dispersing_light( player_t* primary, double raw );
+  void holy_serenity_extras( player_t* target );
+  void holy_pom_cast_extras( player_t* target );
+  void trigger_holy_renew( player_t* target, timespan_t duration );
   void spawn_idol_of_cthun( action_state_t* );
   void trigger_shadowy_apparitions( proc_t* proc, player_t* target, double apparition_damage_mod = 1.0 );
   void trigger_psychic_link( action_state_t* );
@@ -1424,6 +1445,7 @@ struct priest_heal_t : public priest_action_t<heal_t>
   bool divine_aegis;
   bool piety_source;    // wowhub: overhealing feeds Piety
   bool atonement_heal;  // wowhub: Atonement feeds Piety only when it crits
+  bool smart_aoe = false;  // wowhub: area heals reach the most injured allies first
 
   priest_heal_t( util::string_view name, priest_t& player, const spell_data_t* s = spell_data_t::nil() )
     : base_t( name, player, s ), disc_mastery( false ), holy_mastery( false ), divine_aegis( true ),
@@ -1469,6 +1491,11 @@ struct priest_heal_t : public priest_action_t<heal_t>
         target_list.push_back( t );
     }
 
+    if ( smart_aoe && target_list.size() > 2 )
+      std::stable_sort( target_list.begin() + 1, target_list.end(), []( player_t* a, player_t* b ) {
+        return a->resources.pct( RESOURCE_HEALTH ) < b->resources.pct( RESOURCE_HEALTH );
+      } );
+
     // Remove non Healing Enemy pets from valid target list
     for ( const auto& t : sim->healing_pet_list )
     {
@@ -1489,8 +1516,9 @@ struct priest_heal_t : public priest_action_t<heal_t>
     {
       if ( priest().specialization() == PRIEST_HOLY && holy_mastery )
       {
+        // wowhub: Warcraft Logs - Echo of Light is mastery x the EFFECTIVE healing (overhealing makes none)
         residual_action::trigger( p().background_actions.echo_of_light, s->target,
-                                  s->result_total * p().composite_mastery_value() );
+                                  ( sim->heal_target ? s->result_amount : s->result_total ) * p().composite_mastery_value() );
       }
     }
 
