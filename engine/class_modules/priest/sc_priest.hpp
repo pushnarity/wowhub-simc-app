@@ -209,6 +209,7 @@ public:
     propagate_const<buff_t*> empyreal_blaze;
     propagate_const<buff_t*> divine_favor_chastise;
     propagate_const<buff_t*> divine_image;
+    propagate_const<buff_t*> epiphany;  // wowhub: the next Prayer of Mending ignores its cooldown
 
     // Shadow
     propagate_const<buff_t*> dispersion;
@@ -855,6 +856,8 @@ public:
     propagate_const<action_t*> pom_shield;
     propagate_const<action_t*> ultimate_serenity;
     propagate_const<action_t*> divine_hymn_pulse;
+    propagate_const<action_t*> di_blessed_light;  // wowhub: Divine Image's Naaru heals
+    propagate_const<action_t*> di_healing_light;
     propagate_const<actions::spells::horrific_vision_t*> horrific_vision;
     propagate_const<actions::spells::vision_of_nzoth_t*> vision_of_nzoth;
     propagate_const<actions::spells::void_bolt_t*> void_bolt;
@@ -906,6 +909,7 @@ public:
 
     // Time in seconds between prayer of mending bounces
     double prayer_of_mending_bounce_rate = 2;
+    std::string holy_tune;  // wowhub: name=value/name=value fits for the Holy healing model
     int holy_serenity_pool = 20;  // wowhub: same for Holy Word: Serenity
     int holy_heal_pool = 20;  // wowhub: Holy single-target heals pick among the N most injured
 
@@ -1036,7 +1040,7 @@ private:
   void create_buffs_holy();
   void init_spells_holy();
   void init_rng_holy();
-  expr_t* create_expression_holy( action_t* a, util::string_view name_str );
+  std::unique_ptr<expr_t> create_expression_holy( util::string_view name_str );
   action_t* create_action_holy( util::string_view name, util::string_view options_str );
   target_specific_t<priest_td_t> _target_data;
 
@@ -1063,6 +1067,9 @@ public:
   void holy_serenity_extras( player_t* target );
   void holy_pom_cast_extras( player_t* target );
   void trigger_holy_renew( player_t* target, timespan_t duration );
+  void trigger_epiphany();
+  void divine_image_heals( bool blessed );
+  double holy_tune( util::string_view name, double def ) const;
   void spawn_idol_of_cthun( action_state_t* );
   void trigger_shadowy_apparitions( proc_t* proc, player_t* target, double apparition_damage_mod = 1.0 );
   void trigger_psychic_link( action_state_t* );

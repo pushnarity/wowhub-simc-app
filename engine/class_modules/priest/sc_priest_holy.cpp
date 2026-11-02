@@ -52,7 +52,7 @@ struct holy_word_sanctify_t final : public priest_heal_t
   {
     priest_heal_t::execute();
 
-    // wowhub: Eternal Sanctity now lengthens Apotheosis itself (spell data modifies the buff duration)
+    priest().trigger_epiphany();
 
     if ( priest().talents.holy.divine_image.enabled() )
     {
@@ -87,13 +87,15 @@ struct holy_word_serenity_t final : public priest_heal_t
   {
     priest_heal_t::execute();
 
-    // wowhub: Eternal Sanctity now lengthens Apotheosis itself (spell data modifies the buff duration)
+    priest().trigger_epiphany();
 
     if ( priest().talents.holy.divine_image.enabled() )
     {
       priest().buffs.divine_image->trigger();
       priest().procs.divine_image->occur();
     }
+
+    priest().divine_image_heals( false );
 
     // wowhub: Ultimate Serenity, Lasting Words, Cosmic Ripple (Serenity coming off cooldown), Benediction
     priest().holy_serenity_extras( target );
@@ -285,26 +287,85 @@ struct divine_hymn_t final : public priest_heal_t
   }
 };
 
+// wowhub: Divine Image's Naaru casts a heal beside yours (spell ids 196813 Blessed Light, 196809 Healing Light)
+struct di_heal_t final : public priest_heal_t
+{
+  di_heal_t( priest_t& p, util::string_view n, unsigned id ) : priest_heal_t( n, p, p.find_spell( id ) )
+  {
+    background = proc = true;
+    harmful      = false;
+    auto_target  = false;
+    holy_mastery = false;
+    aoe          = 0;
+  }
+
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    return priest_heal_t::composite_da_multiplier( s ) * scale;
+  }
+
+  double scale = 1.0;
+};
+
 struct holy_prayer_of_mending_t final : public priest_heal_t
 {
+  cooldown_t* epiphany_cooldown;
+
   holy_prayer_of_mending_t( priest_t& p, util::string_view options_str )
     : priest_heal_t( "prayer_of_mending", p, p.find_spell( 33076 ) )
   {
     parse_options( options_str );
     harmful = false;
+    epiphany_cooldown = p.get_cooldown( "prayer_of_mending_epiphany", this );
   }
 
   // wowhub: the ward goes on one of the few most injured allies, not always the same one
   player_t* pick_target() override
   {
-    auto inj = holy_injured_allies( p(), nullptr, 5 );
+    // wowhub: in a five-man group the ward goes on the hurt one: one of the two most injured
+    size_t pool = p().sim->healing_no_pet_list.size() <= 6 ? as<size_t>( p().holy_tune( "pom_pool", 2 ) ) : 5;
+    auto inj = holy_injured_allies( p(), nullptr, pool );
     return inj.empty() ? priest_heal_t::pick_target() : inj[ rng().range( inj.size() ) ];
+  }
+
+  // wowhub: Epiphany (a Holy Word gives 25%): the next cast ignores the cooldown and leaves it running
+  bool ready() override
+  {
+    if ( p().buffs.epiphany->check() )
+    {
+      cooldown_t* original = cooldown;
+      cooldown             = epiphany_cooldown;
+      bool r               = priest_heal_t::ready();
+      cooldown             = original;
+      return r;
+    }
+    return priest_heal_t::ready();
+  }
+
+  void queue_execute( execute_type type ) override
+  {
+    cooldown_t* original = cooldown;
+    if ( p().buffs.epiphany->check() )
+      cooldown = epiphany_cooldown;
+    priest_heal_t::queue_execute( type );
+    cooldown = original;
+  }
+
+  void update_ready( timespan_t cd_duration = timespan_t::min() ) override
+  {
+    if ( p().buffs.epiphany->check() )
+      return;
+    priest_heal_t::update_ready( cd_duration );
   }
 
   void execute() override
   {
+    bool free_cast = p().buffs.epiphany->check();
     priest_heal_t::execute();
+    if ( free_cast )
+      p().buffs.epiphany->expire();
     priest().holy_pom_cast_extras( target );
+    priest().divine_image_heals( true );
   }
 };
 }  // namespace actions::heals
@@ -607,7 +668,7 @@ struct holy_word_chastise_t final : public priest_spell_t
   {
     priest_spell_t::execute();
 
-    // wowhub: Eternal Sanctity now lengthens Apotheosis itself (spell data modifies the buff duration)
+    priest().trigger_epiphany();
 
     if ( priest().talents.holy.divine_image.enabled() )
     {
@@ -725,6 +786,8 @@ void priest_t::create_buffs_holy()
   buffs.empyreal_blaze = make_buff( this, "empyreal_blaze", talents.holy.empyreal_blaze_buff )->set_reverse( true );
 
   buffs.divine_favor_chastise = make_buff( this, "divine_favor_chastise", talents.holy.divine_favor_chastise );
+
+  buffs.epiphany = make_buff( this, "epiphany", find_spell( 414556 ) );
 
   buffs.divine_image = make_buff( this, "divine_image", talents.holy.divine_image_buff )
                            ->set_refresh_behavior( buff_refresh_behavior::DURATION )
@@ -879,6 +942,11 @@ void priest_t::init_background_actions_holy()
       background_actions.prompt_prognosis = new simple_holy_heal_t( *this, "prompt_prognosis", 1246798 );
     if ( talents.oracle.assured_safety.enabled() )
       background_actions.pom_shield = new pom_shield_t( *this );
+    if ( talents.holy.divine_image.enabled() )
+    {
+      background_actions.di_blessed_light = new di_heal_t( *this, "divine_image_blessed_light", 196813 );
+      background_actions.di_healing_light = new di_heal_t( *this, "divine_image_healing_light", 196809 );
+    }
     if ( talents.holy.ultimate_serenity.enabled() )
       background_actions.ultimate_serenity = new simple_holy_heal_t( *this, "ultimate_serenity", 1250581 );
   }
@@ -918,6 +986,60 @@ void priest_t::trigger_holy_renew( player_t* target, timespan_t duration )
   a->apply( target, duration );
 }
 
+double priest_t::holy_tune( util::string_view name, double def ) const
+{
+  for ( auto& kv : util::string_split<std::string_view>( options.holy_tune, "/" ) )
+  {
+    auto pr = util::string_split<std::string_view>( kv, "=" );
+    if ( pr.size() == 2 && pr[ 0 ] == name )
+      return util::to_double( pr[ 1 ] );
+  }
+  return def;
+}
+
+// wowhub: Epiphany - a Holy Word has a chance to make the next Prayer of Mending ignore its cooldown
+void priest_t::trigger_epiphany()
+{
+  if ( talents.holy.epiphany.enabled() && rng().roll( talents.holy.epiphany->effectN( 1 ).percent() ) )
+    buffs.epiphany->trigger();
+}
+
+// wowhub: Divine Image - while the image is up, its Naaru heals beside your Holy Word: Serenity and Flash Heal
+// (Healing Light, once per cast) and Prayer of Mending (Blessed Light, about two heals 0.3-1.7 s after the cast)
+void priest_t::divine_image_heals( bool blessed )
+{
+  if ( !holy_heal_mode() || !buffs.divine_image->check() )
+    return;
+  if ( !blessed )
+  {
+    auto* a = debug_cast<actions::heals::di_heal_t*>( background_actions.di_healing_light.get() );
+    if ( !a )
+      return;
+    a->scale = holy_tune( "di_healing", 0.85 );
+    auto inj = actions::heals::holy_injured_allies( *this, nullptr, 3 );
+    if ( !inj.empty() )
+      a->execute_on_target( inj[ rng().range( inj.size() ) ] );
+    return;
+  }
+  auto* a = debug_cast<actions::heals::di_heal_t*>( background_actions.di_blessed_light.get() );
+  if ( !a )
+    return;
+  double n_mean = holy_tune( "di_blessed_n", 2.2 );
+  int n         = as<int>( n_mean );
+  if ( rng().roll( n_mean - n ) )
+    n++;
+  for ( int i = 0; i < n; i++ )
+  {
+    timespan_t delay = timespan_t::from_millis( 300 + rng().range( 1400 ) );
+    make_event( *sim, delay, [ this, a ] {
+      a->scale = holy_tune( "di_blessed", 1.2 );
+      auto inj = actions::heals::holy_injured_allies( *this, nullptr, 3 );
+      if ( !inj.empty() )
+        a->execute_on_target( inj[ rng().range( inj.size() ) ] );
+    } );
+  }
+}
+
 // Holy Word: Serenity: Ultimate Serenity heals, Lasting Words Renews, Cosmic Ripple
 void priest_t::holy_serenity_extras( player_t* target )
 {
@@ -939,8 +1061,11 @@ void priest_t::holy_serenity_extras( player_t* target )
   if ( talents.holy.cosmic_ripple.enabled() )
     trigger_cosmic_ripple();
 
-  if ( talents.holy.benediction_serenity.enabled() &&
-       rng().roll( talents.holy.benediction_serenity->effectN( 2 ).percent() ) )
+  // wowhub: in the Mythic+ build logs the upgrade follows about 1 in 6 Serenity casts (the raid build: every one)
+  double bene_roll = talents.holy.benediction_serenity->effectN( 2 ).percent();
+  if ( talents.holy.divine_image.enabled() || talents.holy.burning_vehemence.enabled() )
+    bene_roll = holy_tune( "bene_serenity", 0.15 );
+  if ( talents.holy.benediction_serenity.enabled() && rng().roll( bene_roll ) )
     buffs.benediction->trigger();
 }
 
@@ -968,8 +1093,42 @@ void priest_t::holy_pom_cast_extras( player_t* target )
                       timespan_t::from_seconds( talents.holy.voice_of_harmony->effectN( 2 ).base_value() ) );
 }
 
-expr_t* priest_t::create_expression_holy( action_t*, util::string_view /*name_str*/ )
+std::unique_ptr<expr_t> priest_t::create_expression_holy( util::string_view name_str )
 {
+  if ( !holy_heal_mode() )
+    return nullptr;
+  // wowhub: raid health for the healing priority (same names as the Restoration Shaman's)
+  auto count_below = [ this ]( double pct ) {
+    return [ this, pct ]() {
+      int n = 0;
+      for ( auto* t : sim->healing_no_pet_list )
+        if ( !t->is_sleeping() && t->resources.pct( RESOURCE_HEALTH ) < pct )
+          n++;
+      return as<double>( n );
+    };
+  };
+  if ( util::str_compare_ci( name_str, "injured_95" ) )
+    return make_fn_expr( name_str, count_below( 0.95 ) );
+  if ( util::str_compare_ci( name_str, "injured_90" ) )
+    return make_fn_expr( name_str, count_below( 0.90 ) );
+  if ( util::str_compare_ci( name_str, "injured_80" ) )
+    return make_fn_expr( name_str, count_below( 0.80 ) );
+  if ( util::str_compare_ci( name_str, "injured_70" ) )
+    return make_fn_expr( name_str, count_below( 0.70 ) );
+  if ( util::str_compare_ci( name_str, "injured_60" ) )
+    return make_fn_expr( name_str, count_below( 0.60 ) );
+  if ( util::str_compare_ci( name_str, "raid_deficit" ) )  // average missing health of the group, in percent
+    return make_fn_expr( name_str, [ this ]() {
+             double sum = 0;
+             int n      = 0;
+             for ( auto* t : sim->healing_no_pet_list )
+               if ( !t->is_sleeping() )
+               {
+                 sum += 1.0 - t->resources.pct( RESOURCE_HEALTH );
+                 n++;
+               }
+             return n ? 100.0 * sum / n : 0.0;
+           } );
   return nullptr;
 }
 
@@ -996,6 +1155,24 @@ void priest_t::apl_holy_heal()
   default_->add_action( "use_item,slot=trinket2,if=!variable.trinket_2_ogcd_cast" );
   default_->add_action( "use_item,use_off_gcd=1,slot=trinket1,if=variable.trinket_1_ogcd_cast&gcd.remains>=0.75*gcd.max" );
   default_->add_action( "use_item,use_off_gcd=1,slot=trinket2,if=variable.trinket_2_ogcd_cast&gcd.remains>=0.75*gcd.max" );
+  // wowhub: the Mythic+ build (Divine Image / Burning Vehemence) weaves damage between the heals: Holy Fire off its
+  // cooldown and Smite as the filler, both feed the Holy Words; Divine Hymn waits for a hurt group
+  bool mplus = talents.holy.divine_image.enabled() || talents.holy.burning_vehemence.enabled();
+  if ( mplus )
+  {
+    default_->add_action( "divine_hymn,if=time>30&injured_80>=2" );
+    default_->add_action( "holy_word_chastise" );
+    default_->add_action( "holy_fire,if=buff.empyreal_blaze.up" );
+    default_->add_action( "apotheosis,if=cooldown.holy_word_serenity.charges_fractional<1.5" );
+    default_->add_action( "holy_word_serenity" );
+    default_->add_action( "prayer_of_mending" );
+    default_->add_action( "benediction" );
+    default_->add_action( "holy_fire" );
+    default_->add_action( "flash_heal,if=mana.pct>=90*fight_remains%(time+fight_remains)" );
+    default_->add_action( "smite" );
+    return;
+  }
+
   default_->add_action( "divine_hymn,if=time>30" );
   default_->add_action( "holy_word_chastise" );
   default_->add_action( "holy_fire,if=buff.empyreal_blaze.up" );
