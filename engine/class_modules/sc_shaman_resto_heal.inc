@@ -892,8 +892,10 @@ action_t* shaman_t::create_action_resto_heal( util::string_view name, util::stri
   return nullptr;
 }
 
-// Healing priority (measured on top Heroic logs, ~236 s): Chain Heal ~93, Riptide ~43, Healing Stream Totem ~21,
-// Surging Totem ~10 (on cooldown), Healing Wave ~7 (Nature's Swiftness), Ascendance 2, Spirit Link Totem 2.
+// Healing priority (measured on top Heroic logs, ~236 s): Chain Heal ~93 (26 of them the free Lively Totems ones),
+// Riptide ~43, Healing Stream Totem ~15 + Stormstream ~6, Surging Totem ~10 (on cooldown), Healing Wave ~7 (Nature's
+// Swiftness), Ascendance 2, Spirit Link Totem 2. Chain Heal waits for 2 injured allies and a mana curve: real players
+// spend only ~65% of the fight casting.
 void shaman_t::apl_resto_heal()
 {
   action_priority_list_t* precombat = get_action_priority_list( "precombat" );
@@ -911,6 +913,6 @@ void shaman_t::apl_resto_heal()
   def->add_action( "natures_swiftness,if=group_size>=10" );
   def->add_action( "healing_wave,if=buff.natures_swiftness.up" );
   def->add_action( "riptide" );
-  def->add_action( "chain_heal,if=injured_90>=1+group_size%7&mana.pct>=10+80*fight_remains%(time+fight_remains)" );
+  def->add_action( "chain_heal,if=injured_95>=2&mana.pct>=10+80*fight_remains%(time+fight_remains)" );
   def->add_action( "chain_heal,if=buff.ascendance_rh.up&injured_95>=1" );
 }
