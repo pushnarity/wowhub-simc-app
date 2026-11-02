@@ -38,16 +38,17 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -yq ninja-build
       - name: Build a checking engine
         run: |
-          FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+          # vptr is off: SimulationCraft recycles event memory on purpose, which that check misreads
+          FLAGS="-O1 -g -fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer"
           cmake -S . -B build $CMAKE_FLAGS -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_CXX_FLAGS="$FLAGS" -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+            -DCMAKE_CXX_FLAGS="$FLAGS" -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined -fno-sanitize=vptr"
           cmake --build build --target simc
       - name: Run the checks on it
         env:
           ITER: "10"
           SKIP_SPEED: "1"
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
-          UBSAN_OPTIONS: print_stacktrace=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1:suppressions=${{ github.workspace }}/wowhub/ci/ubsan.supp
         run: wowhub/ci/run.sh build/simc
 
   warnings:
