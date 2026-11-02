@@ -28,6 +28,18 @@ struct mw_heal_state_t
            *revival_a = nullptr, *courage_a = nullptr, *yulons_grace_a = nullptr, *sf_soothing_a = nullptr,
            *sf_cocoon_a = nullptr, *sanctuary_heal_a = nullptr;
 
+  // fistweaving build (Chi-Ji, Ancient Teachings, Way of the Crane): only when those talents are picked
+  bool fist = false;
+  player_talent_t way_of_the_crane, jadefire_teachings, crane_style, invoke_chiji_t, sheiluns_gift_t, emperors_elixir,
+      morning_breeze, xuens_guidance, healing_elixir_t, mists_of_life;
+  buff_t *totm = nullptr, *chiji_b = nullptr;
+  action_t *at_a = nullptr, *at_k[ 5 ] = { nullptr, nullptr, nullptr, nullptr, nullptr }, *wotc_a = nullptr, *chiji_gust_a = nullptr, *sg_main_a = nullptr, *sg_other_a = nullptr,
+           *chiji_coc_a = nullptr, *he_a = nullptr, *grace_a = nullptr, *hit_rsk = nullptr, *hit_tp = nullptr,
+           *hit_bok = nullptr, *hit_sck = nullptr, *hit_jf = nullptr;
+  cooldown_t* cd_rsk = nullptr;
+  action_t *ox_a = nullptr, *ward_a = nullptr, *felheart_a = nullptr;
+  timespan_t last_he = 0_ms;
+
   timespan_t cached_at = timespan_t::min();
   int cached_rm = 0;
   player_t* lowest_rm = nullptr;
@@ -47,6 +59,7 @@ struct mw_heal_state_t
     cached_at = timespan_t::min();
     cached_rm = 0;
     mana_spent = 0.0;
+    last_he    = 0_ms;
   }
 
   dot_t* dot_of( action_t* a, player_t* tg ) const { return a ? a->find_dot( tg ) : nullptr; }
@@ -140,16 +153,62 @@ struct mw_heal_state_t
     return l.empty() ? nullptr : l[ p->rng().range( l.size() ) ];
   }
 
-  void spiritfont_proc()
+  // a tuning value with its own default for the fistweaving build
+  double tf( const char* k, double raid, double fistv ) const { return t( k, fist ? fistv : raid ); }
+
+  void spiritfont_proc( bool force = false )
   {
-    if ( !spiritfont.ok() || !sf_soothing_a || !p->rng().roll( t( "sf_chance", 0.13 ) ) )
+    if ( !spiritfont.ok() || !sf_soothing_a || ( !force && !p->rng().roll( tf( "sf_chance", 0.13, 0.05 ) ) ) )
       return;
-    double amt = 15300.0 * p->cache.spell_power( SCHOOL_NATURE ) / 3532.0 * t( "sf_cocoon", 1.4 );
-    for ( auto* tg : injured( 10, nullptr, false ) )
+    double amt = ( fist ? 15.1 : 15300.0 / 3532.0 ) * p->cache.spell_power( SCHOOL_NATURE ) * tf( "sf_cocoon", 1.4, 1.0 );
+    for ( auto* tg : injured( (size_t)tf( "sf_ncoc", 10, 3 ), nullptr, false ) )
       sf_cocoon_a->execute_on_target( tg, amt );
-    for ( int i = 0; i < 34; i++ )
+    int n = (int)tf( "sf_nsm", 34, 19 );
+    for ( int i = 0; i < n; i++ )
       if ( auto* tg = most_injured() )
         sf_soothing_a->execute_on_target( tg );
+  }
+
+  // Ancient Teachings and Way of the Crane: what one strike of a kick does for the group
+  // kinds: 0 Rising Sun Kick, 1 Tiger Palm, 2 Blackout Kick, 3 Spinning Crane Kick tick, 4 Jadefire Stomp
+  void after_hit( int kind, double amt, double nhit )
+  {
+    if ( !fist )
+      return;
+    double one = amt / std::max( nhit, 1.0 );
+    if ( kind == 3 )
+    {
+      int hits = std::max( 1, (int)std::lround( nhit ) );
+      for ( int i = 0; i < hits; i++ )
+        if ( auto* tg = random_ally() )
+          wotc_a->execute_on_target( tg, one * t( "wotc", 2.7 ) );
+      return;
+    }
+    double k = kind == 4 ? t( "at_jf", 0.2 ) : t( "at", 0.82 );
+    int reps = kind == 4 ? std::max( 1, (int)std::lround( nhit ) ) : 1;
+    for ( int r = 0; r < reps; r++ )
+      for ( auto* tg : injured( (size_t)t( "at_n", 3 ) ) )
+        if ( tg->resources.pct( RESOURCE_HEALTH ) < t( "at_thr", 1.0 ) )
+          at_k[ kind ]->execute_on_target( tg, one * k );
+  }
+
+  // Crane Style / Invoke Chi-Ji gusts when a kick is cast
+  void kick_gusts( double crane_style_chance )
+  {
+    if ( !fist )
+      return;
+    if ( crane_style.ok() && p->rng().roll( crane_style_chance ) )
+      for ( auto* tg : injured( (size_t)t( "cs_n", 2 ), nullptr, false ) )
+        gust_a->execute_on_target( tg );
+    if ( chiji_b && chiji_b->check() )
+    {
+      auto l = injured( 5, nullptr, false );
+      if ( l.empty() )
+        return;
+      int n = (int)std::lround( t( "chiji_n", 12.6 ) );
+      for ( int i = 0; i < n; i++ )
+        chiji_gust_a->execute_on_target( l[ i % l.size() ] );
+    }
   }
 
   // multiplier on everything the monk heals on one target
@@ -248,7 +307,7 @@ struct gust_t : public mh_t
     auto_target       = false;
     spell_power_mod.direct = 1.0;
     base_dd_min = base_dd_max = 0;
-    eff = pl->mw ? pl->mw->t( "gust", 1.0 ) : 1.0;
+    eff = pl->mw ? pl->mw->tf( "gust", 1.0, 0.8 ) : 1.0;
   }
   double composite_da_multiplier( const action_state_t* s ) const override
   {
@@ -267,7 +326,7 @@ struct rm_hot_t : public mh_t
     dot_behavior      = dot_behavior_e::DOT_REFRESH_DURATION;
     hasted_ticks      = true;
     tick_may_crit     = true;
-    eff               = pl->mw->t( "rm", 1.0 );
+    eff               = pl->mw->tf( "rm", 1.0, 3.5 );
     if ( shortv )
       dot_duration = timespan_t::from_seconds( pl->mw->rapid_diffusion.ok() ? pl->mw->rapid_diffusion->effectN( 1 ).base_value() : 6.0 );
     else if ( pl->mw->lotus_infusion.ok() )
@@ -385,11 +444,11 @@ struct em_t : public mh_t
     dot_duration              = 0_ms;
     base_tick_time            = 0_ms;
     spell_power_mod.tick      = 0;
-    cooldown->duration        = timespan_t::from_seconds( pl->mw->t( "em_cd", 9.0 ) );
+    cooldown->duration        = timespan_t::from_seconds( pl->mw->tf( "em_cd", 9.0, 20.0 ) );
   }
   timespan_t execute_time() const override
   {
-    if ( st().tft->check() )
+    if ( st().tft->check() || ( st().chiji_b && st().chiji_b->check() ) )
       return 0_ms;
     timespan_t t = mh_t::execute_time();
     if ( st().spiritfont_b && st().spiritfont_b->check() )
@@ -540,14 +599,16 @@ struct tft_t : public monk_spell_t
     gcd_type = gcd_haste_type::NONE;
     trigger_gcd = 0_ms;
     // empowers the next spells; the cooldown is reset by the tea itself
-    cooldown->duration = timespan_t::from_seconds( pl->mw->t( "tft_cd", 30.0 ) );
+    cooldown->duration = timespan_t::from_seconds( pl->mw->tf( "tft_cd", 30.0, 25.0 ) );
   }
   void execute() override
   {
     monk_spell_t::execute();
-    p()->mw->tft->trigger();
+    p()->mw->tft->trigger( p()->mw->fist ? (int)p()->mw->t( "tft_stacks", 2 ) : 1 );
     if ( p()->mw->spiritfont_b )
       p()->mw->spiritfont_b->trigger();
+    if ( p()->mw->fist )
+      p()->mw->spiritfont_proc( true );
   }
 };
 
@@ -603,8 +664,10 @@ struct revival_t : public mh_t
   {
     parse_options( opts );
     aoe         = -1;
-    eff         = pl->mw->t( "revival", 0.21 );
+    eff         = pl->mw->tf( "revival", 0.21, 1.0 );
     auto_target = true;
+    if ( pl->mw->fist )
+      cooldown->duration = timespan_t::from_seconds( pl->mw->t( "revival_cd", 400.0 ) );
   }
 };
 
@@ -617,14 +680,14 @@ struct cocoon_t : public mh_t
     base_dd_min = base_dd_max = 0;
     spell_power_mod.direct    = 0;
     use_target                = false;
-    cooldown->duration        = timespan_t::from_seconds( pl->mw->t( "cocoon_cd", 80.0 ) );
+    cooldown->duration        = timespan_t::from_seconds( pl->mw->tf( "cocoon_cd", 80.0, 100.0 ) );
   }
   void execute() override
   {
     mh_t::execute();
     auto& s = *p()->mw;
     double amt = p()->resources.max[ RESOURCE_HEALTH ] * data().effectN( 3 ).percent() *
-                 ( 1.0 + p()->cache.heal_versatility() ) * s.t( "cocoon", 1.15 );
+                 ( 1.0 + p()->cache.heal_versatility() ) * s.tf( "cocoon", 1.15, 1.8 );
     s.cocoon_a->execute_on_target( s.most_injured(), amt );
   }
 };
@@ -640,6 +703,8 @@ struct conduit_t : public monk_spell_t
     base_tick_time = 1_s;
     dot_duration   = 4_s;
     hasted_ticks   = true;
+    if ( pl->mw->fist )
+      cooldown->duration = timespan_t::from_seconds( pl->mw->t( "conduit_cd", 145.0 ) );
   }
   void tick( dot_t* d ) override
   {
@@ -660,6 +725,209 @@ struct simple_cast_t : public monk_spell_t
   {
     parse_options( opts );
     harmful = false;
+  }
+};
+
+
+// ==========================================================================
+// Fistweaving build: kicks that feed Ancient Teachings / Way of the Crane / Crane Style / Invoke Chi-Ji
+// ==========================================================================
+
+// One damage strike of a kick; the group heals it causes are handed to the state (after_hit).
+struct hit_t : public monk_spell_t
+{
+  int kind;
+  double n = 1.0;  // enemies hit at once (the damage is scaled, one enemy is simulated)
+  double fit;
+  hit_t( monk_t* pl, std::string_view nm, unsigned dmg_id, int k, double f ) : monk_spell_t( pl, nm, pl->find_spell( dmg_id ) ), kind( k ), fit( f )
+  {
+    background = true;
+    base_dd_min = base_dd_max = 0;
+    attack_power_mod.direct   = 0;
+    ap_type                   = attack_power_type::NONE;
+    spell_power_mod.direct    = pl->find_spell( dmg_id )->effectN( 1 ).ap_coeff();
+    base_costs[ RESOURCE_ENERGY ] = base_costs[ RESOURCE_CHI ] = base_costs[ RESOURCE_MANA ] = 0;
+  }
+  mw_heal_state_t& st() const { return *p()->mw; }
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    double m = monk_spell_t::composite_da_multiplier( s ) * n * fit;
+    if ( kind == 0 && st().morning_breeze.ok() )  // Morning Breeze: Rising Sun Kick damage up by the mastery rating (fitted 0.0156% a point)
+      m *= 1.0 + p()->composite_mastery_rating() * st().t( "mb", 0.000156 );
+    return m;
+  }
+  void impact( action_state_t* s ) override
+  {
+    monk_spell_t::impact( s );
+    st().after_hit( kind, s->result_amount, n );
+  }
+};
+
+struct kick_base_t : public monk_spell_t
+{
+  kick_base_t( monk_t* pl, std::string_view nm, unsigned id, std::string_view opts ) : monk_spell_t( pl, nm, pl->find_spell( id ) )
+  {
+    parse_options( opts );
+    base_dd_min = base_dd_max = 0;
+    attack_power_mod.direct   = 0;
+    spell_power_mod.direct    = 0;
+    ap_type                   = attack_power_type::NONE;
+    base_costs[ RESOURCE_ENERGY ] = base_costs[ RESOURCE_CHI ] = 0;
+  }
+  mw_heal_state_t& st() const { return *p()->mw; }
+  void courage()
+  {
+    auto& s = st();
+    if ( s.courage_a && rng().roll( s.t( "courage_f", 0.0 ) ) )
+      if ( auto* tg = s.most_injured() )
+        s.courage_a->execute_on_target( tg );
+  }
+};
+
+struct f_rsk_t : public kick_base_t
+{
+  f_rsk_t( monk_t* pl, std::string_view opts ) : kick_base_t( pl, "rising_sun_kick", 107428, opts )
+  {
+    cooldown->duration = timespan_t::from_seconds( pl->mw->t( "rsk_cd", 8.0 ) );
+    cooldown->hasted   = true;
+    pl->mw->cd_rsk     = cooldown;
+  }
+  void execute() override
+  {
+    kick_base_t::execute();
+    auto& s       = st();
+    bool stomp    = s.emperors_elixir.ok() && s.tft->check();
+    if ( stomp )
+      s.tft->decrement();
+    s.hit_rsk->execute_on_target( target );
+    if ( rng().roll( s.t( "rsk_again", 0.35 ) ) )
+      cooldown->reset( true );
+    if ( stomp || ( s.emperors_elixir.ok() && rng().roll( s.t( "jf_extra", 0.09 ) ) ) )
+      s.hit_jf->execute_on_target( target );
+    s.kick_gusts( 1.0 );
+    s.spiritfont_proc();
+  }
+};
+
+struct f_tp_t : public kick_base_t
+{
+  f_tp_t( monk_t* pl, std::string_view opts ) : kick_base_t( pl, "tiger_palm", 100780, opts ) {}
+  void execute() override
+  {
+    kick_base_t::execute();
+    auto& s = st();
+    int hits = s.way_of_the_crane.ok() ? 2 : 1;
+    for ( int i = 0; i < hits; i++ )
+      s.hit_tp->execute_on_target( target );
+    s.totm->trigger();
+    courage();
+    s.kick_gusts( s.t( "cs_tp", 0.02 ) );
+  }
+};
+
+struct f_bok_t : public kick_base_t
+{
+  f_bok_t( monk_t* pl, std::string_view opts ) : kick_base_t( pl, "blackout_kick", 100784, opts )
+  {
+    cooldown->duration = timespan_t::from_seconds( pl->mw->t( "bok_cd", 3.0 ) );
+    cooldown->hasted   = true;
+  }
+  void execute() override
+  {
+    kick_base_t::execute();
+    auto& s     = st();
+    int strikes = 1 + s.totm->check();
+    bool had    = s.totm->check() > 0;
+    s.totm->expire();
+    for ( int i = 0; i < strikes; i++ )
+      s.hit_bok->execute_on_target( target );
+    if ( had && s.cd_rsk && rng().roll( s.t( "rsk_reset", 0.12 ) ) )
+      s.cd_rsk->reset( true );
+    s.kick_gusts( s.t( "cs_bok", 0.66 ) );
+  }
+};
+
+struct f_sck_t : public kick_base_t
+{
+  f_sck_t( monk_t* pl, std::string_view opts ) : kick_base_t( pl, "spinning_crane_kick", 101546, opts )
+  {
+    channeled      = true;
+    tick_zero      = false;
+    harmful        = true;
+    base_tick_time = 500_ms;
+    dot_duration   = timespan_t::from_seconds( pl->mw->t( "sck_dur", 1.35 ) );
+    cooldown->duration = timespan_t::from_seconds( pl->mw->t( "sck_cd", 8.5 ) );
+    hasted_ticks   = true;
+  }
+  void execute() override
+  {
+    kick_base_t::execute();
+    st().kick_gusts( st().t( "cs_sck", 0.48 ) );
+  }
+  void tick( dot_t* d ) override
+  {
+    kick_base_t::tick( d );
+    st().hit_sck->execute_on_target( target );
+  }
+};
+
+struct f_sg_t : public mh_t
+{
+  f_sg_t( monk_t* pl, std::string_view opts ) : mh_t( pl, "sheiluns_gift", pl->find_spell( 399491 ) )
+  {
+    parse_options( opts );
+    use_target = false;
+    base_dd_min = base_dd_max = 0;
+    spell_power_mod.direct    = 0;
+    aoe                       = 0;
+    cooldown->duration        = timespan_t::from_seconds( pl->mw->t( "sg_cd", 34.0 ) );
+  }
+  void execute() override
+  {
+    mh_t::execute();
+    auto& s = st();
+    auto l  = s.injured( 3, nullptr, false );
+    for ( size_t i = 0; i < l.size(); i++ )
+      ( i == 0 ? s.sg_main_a : s.sg_other_a )->execute_on_target( l[ i ] );
+    if ( s.courage_a && rng().roll( s.t( "courage_f", 0.0 ) ) )
+      if ( auto* tg = s.most_injured() )
+        s.courage_a->execute_on_target( tg );
+  }
+};
+
+struct chiji_t : public monk_spell_t
+{
+  chiji_t( monk_t* pl, std::string_view opts ) : monk_spell_t( pl, "invoke_chiji", pl->find_spell( 325197 ) )
+  {
+    parse_options( opts );
+    harmful = false;
+    base_dd_min = base_dd_max = 0;
+    cooldown->duration = timespan_t::from_seconds( pl->mw->t( "chiji_cd", 72.0 ) );
+  }
+  void execute() override
+  {
+    monk_spell_t::execute();
+    auto& s = *p()->mw;
+    s.chiji_b->trigger();
+    double amt = 26.6 * p()->cache.spell_power( SCHOOL_NATURE ) * s.t( "chiji_coc", 0.97 );
+    for ( auto* tg : s.injured( 5, nullptr, false ) )
+      s.chiji_coc_a->execute_on_target( tg, amt );
+  }
+};
+
+struct cgust_t : public mh_t
+{
+  cgust_t( monk_t* pl ) : mh_t( pl, "chiji_gust_of_mists", pl->find_spell( 343819 ) )
+  {
+    background = proc = true;
+    auto_target       = false;
+    spell_power_mod.direct = 1.0;
+    base_dd_min = base_dd_max = 0;
+    eff = pl->mw->t( "cgust", 0.5 );
+  }
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    return mh_t::composite_da_multiplier( s ) * p()->cache.mastery_value();
   }
 };
 
@@ -734,18 +1002,35 @@ void monk_t::init_mw_heal()
   s.unity_within               = HT( "Unity Within" );
   s.chijis_swiftness           = HT( "Chi-Ji's Swiftness" );
   s.jade_sanctuary             = HT( "Jade Sanctuary" );
+  s.way_of_the_crane   = ST( "Way of the Crane" );
+  s.jadefire_teachings = ST( "Jadefire Teachings" );
+  s.crane_style        = ST( "Crane Style" );
+  s.invoke_chiji_t     = ST( "Invoke Chi-Ji, the Red Crane" );
+  s.sheiluns_gift_t    = ST( "Sheilun's Gift" );
+  s.emperors_elixir    = ST( "Emperor's Elixir" );
+  s.morning_breeze     = ST( "Morning Breeze" );
+  s.xuens_guidance     = HT( "Xuen's Guidance" );
+  s.healing_elixir_t   = ST( "Healing Elixir" );
+  s.mists_of_life      = ST( "Mists of Life" );
+  s.fist               = s.way_of_the_crane.ok() || s.jadefire_teachings.ok();
 }
 
 void monk_t::create_mw_heal_actions()
 {
   auto& s = *mw;
-  s.tft          = make_buff( this, "tft_mw", find_spell( 116680 ) )->set_max_stack( 1 )->set_duration( 30_s );
+  s.tft          = make_buff( this, "tft_mw", find_spell( 116680 ) )->set_max_stack( s.fist ? 2 : 1 )->set_duration( 30_s );
   s.viv_free     = make_buff( this, "vivacious_mw", find_spell( 392883 ) )->set_max_stack( 1 );
   s.zen_ready    = make_buff( this, "zen_pulse_mw", find_spell( 446334 ) )->set_max_stack( 1 )->set_duration( 120_s );
   s.yulon_b      = make_buff( this, "yulon_mw", find_spell( 322118 ) )->set_duration( 25_s );
   s.mana_tea_stacks = make_buff( this, "mana_tea_stacks_mw", find_spell( 115867 ) )->set_max_stack( 20 )->set_duration( 3600_s );
   if ( s.spiritfont.ok() )
     s.spiritfont_b = make_buff( this, "spiritfont_mw", find_spell( 1260565 ) )->set_max_stack( 1 );
+
+  if ( s.fist )
+  {
+    s.totm    = make_buff( this, "totm_mw", find_spell( 202090 ) )->set_max_stack( 4 )->set_duration( 120_s );
+    s.chiji_b = make_buff( this, "chiji_mw", find_spell( 325197 ) )->set_max_stack( 1 )->set_duration( timespan_t::from_seconds( s.t( "chiji_dur", 12.5 ) ) );
+  }
 
   s.rm_hot = new mwheal::rm_hot_t( this );
   s.rm_hot2 = new mwheal::rm_hot_t( this, true );
@@ -772,7 +1057,7 @@ void monk_t::create_mw_heal_actions()
   }
   {
     auto* a = new mwheal::simple_heal_t( this, "celestial_conduit_heal", 443039 );
-    a->eff  = s.t( "conduit", 0.174 );
+    a->eff  = s.tf( "conduit", 0.174, 1.46 );
     s.conduit_heal_a = a;
   }
   new mwheal::rwk_heal_t( this );
@@ -780,14 +1065,14 @@ void monk_t::create_mw_heal_actions()
   s.sf_cocoon_a = new mwheal::flat_absorb_t( this, "chi_cocoon", 116849 );
   {
     auto* a = new mwheal::simple_heal_t( this, "spiritfont_soothing", 115175 );
-    a->spell_power_mod.direct = 0.82 * s.t( "sf_soothing", 1.0 );
+    a->spell_power_mod.direct = 0.82 * s.tf( "sf_soothing", 1.0, 5.0 );
     a->use_target = false;
     s.sf_soothing_a = a;
   }
   if ( s.courage_of_the_white_tiger.ok() )
   {
-    auto* a = new mwheal::simple_heal_t( this, "courage_of_the_white_tiger", 443106 );
-    a->spell_power_mod.direct = 18.4 * s.t( "courage_eff", 1.0 );
+    auto* a = new mwheal::simple_heal_t( this, "courage_claw_heal", 443106 );
+    a->spell_power_mod.direct = 18.4 * s.tf( "courage_eff", 1.0, 1.29 );
     a->use_target = false;
     s.courage_a = a;
   }
@@ -799,6 +1084,65 @@ void monk_t::create_mw_heal_actions()
     s.sanctuary_heal_a = a;
   }
 
+  if ( s.fist )
+  {
+    auto flat = [ & ]( std::string_view n, unsigned id, bool crit ) {
+      auto* a = new mwheal::simple_heal_t( this, n, id );
+      a->spell_power_mod.direct = 0;
+      a->use_target             = false;
+      a->may_crit               = crit;
+      return a;
+    };
+    s.at_a   = flat( "ancient_teachings", 388024, false );
+    for ( int i = 0; i < 5; i++ )
+      s.at_k[ i ] = flat( std::string( "ancient_teachings_" ) + ( i == 0 ? "rsk" : i == 1 ? "tp" : i == 2 ? "bok" : i == 3 ? "sck" : "jadefire" ), 388024, false );
+    s.wotc_a = flat( "way_of_the_crane_heal", 389325, false );
+    s.he_a   = flat( "healing_elixir", 428439, true );
+    {
+      auto* a = new mwheal::simple_heal_t( this, "yulons_grace_heal", 414143 );
+      a->spell_power_mod.direct = s.t( "grace_sp", 7.8 );
+      a->use_target             = false;
+      s.grace_a                 = a;
+    }
+    if ( s.strength_of_the_black_ox.ok() )
+    {
+      auto* a = new mwheal::simple_heal_t( this, "strength_of_the_black_ox_heal", 443113 );
+      a->spell_power_mod.direct = s.t( "ox_sp", 4.5 );
+      a->use_target             = false;
+      s.ox_a                    = a;
+    }
+    if ( s.chi_warding.ok() )
+    {
+      auto* a = new mwheal::simple_heal_t( this, "chi_warding_heal", 1277446 );
+      a->spell_power_mod.direct = s.t( "ward_sp", 6.3 );
+      a->use_target             = false;
+      s.ward_a                  = a;
+    }
+    // Unstable Felheart Crystal (250255), an on-use shield
+    if ( find_item_by_id( 250255 ) )
+      s.felheart_a = new mwheal::flat_absorb_t( this, "unstable_felheart_crystal", 1255200 );
+    s.chiji_gust_a = new mwheal::cgust_t( this );
+    s.chiji_coc_a  = new mwheal::flat_absorb_t( this, "chiji_chi_cocoon", 116849 );
+    {
+      auto* a = new mwheal::simple_heal_t( this, "sheiluns_gift_main", 399491 );
+      a->spell_power_mod.direct = s.t( "sg_main", 41.0 );
+      s.sg_main_a               = a;
+      auto* b = new mwheal::simple_heal_t( this, "sheiluns_gift_other", 399491 );
+      b->spell_power_mod.direct = s.t( "sg_other", 7.4 );
+      s.sg_other_a              = b;
+    }
+    s.hit_rsk = new mwheal::hit_t( this, "rising_sun_kick_hit", 185099, 0, s.t( "rsk_dmg", 1.72 ) );
+    s.hit_tp  = new mwheal::hit_t( this, "tiger_palm_hit", 100780, 1, s.t( "tp_dmg", 1.13 ) );
+    s.hit_bok = new mwheal::hit_t( this, "blackout_kick_hit", 228649, 2, s.t( "bok_dmg", 0.61 ) );
+    {
+      auto* h = new mwheal::hit_t( this, "spinning_crane_kick_hit", 107270, 3, s.t( "sck_dmg", 2.45 ) );
+      h->n    = s.t( "sck_n", 7.5 );
+      s.hit_sck = h;
+      auto* j = new mwheal::hit_t( this, "jadefire_stomp_hit", 1248815, 4, s.t( "jf_dmg", 1.0 ) );
+      j->n    = s.t( "jf_n", 4.0 );
+      s.hit_jf = j;
+    }
+  }
 
   register_combat_begin( [ this ]( player_t* ) {
     auto& st0 = *mw;
@@ -817,6 +1161,37 @@ void monk_t::create_mw_heal_actions()
       make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "grace_int", 2.2 ) ), [ this ] {
         mw->yulons_grace_a->execute_on_target( this, resources.max[ RESOURCE_HEALTH ] * 0.0087 );
       } );
+    if ( st0.fist )
+    {
+      // Healing Elixir: one every so often, drunk when the monk is hurt
+      make_repeating_event( *sim, 1_s, [ this ] {
+        auto& st = *mw;
+        if ( sim->current_time() - st.last_he >= timespan_t::from_seconds( st.t( "he_int", 38.6 ) ) &&
+             resources.pct( RESOURCE_HEALTH ) < st.t( "he_thr", 0.8 ) )
+        {
+          st.last_he = sim->current_time();
+          st.he_a->execute_on_target( this, resources.max[ RESOURCE_HEALTH ] * st.t( "he_pct", 0.154 ) );
+        }
+      } );
+      if ( st0.felheart_a )
+        make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "felheart_int", 135.0 ) ), [ this ] {
+          if ( auto* tg = mw->most_injured() )
+            mw->felheart_a->execute_on_target( tg, mw->t( "felheart_amt", 780000.0 ) );
+        } );
+      if ( st0.ox_a )
+        make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "ox_int", 7.0 ) ), [ this ] {
+          if ( auto* tg = mw->most_injured() )
+            mw->ox_a->execute_on_target( tg );
+        } );
+      if ( st0.ward_a )
+        make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "ward_int", 13.4 ) ), [ this ] {
+          mw->ward_a->execute_on_target( this );
+        } );
+      if ( st0.yulons_grace.ok() )
+        make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "grace_int", 7.2 ) ), [ this ] {
+          mw->grace_a->execute_on_target( this );
+        } );
+    }
     // Mana Tea: one stack per slice of mana spent
     make_repeating_event( *sim, 1_s, [ this ] {
       auto& st      = *mw;
@@ -855,6 +1230,21 @@ action_t* monk_t::create_action_mw_heal( std::string_view name, std::string_view
     return new mwheal::cocoon_t( this, options_str );
   if ( name == "celestial_conduit" )
     return new mwheal::conduit_t( this, options_str );
+  if ( mw->fist )
+  {
+    if ( name == "rising_sun_kick" )
+      return new mwheal::f_rsk_t( this, options_str );
+    if ( name == "tiger_palm" )
+      return new mwheal::f_tp_t( this, options_str );
+    if ( name == "blackout_kick" )
+      return new mwheal::f_bok_t( this, options_str );
+    if ( name == "spinning_crane_kick" )
+      return new mwheal::f_sck_t( this, options_str );
+    if ( name == "sheiluns_gift" )
+      return new mwheal::f_sg_t( this, options_str );
+    if ( name == "invoke_chiji" || name == "invoke_chiji_the_red_crane" )
+      return new mwheal::chiji_t( this, options_str );
+  }
   return nullptr;
 }
 
@@ -891,6 +1281,12 @@ std::unique_ptr<expr_t> monk_t::create_expression_mw_heal( std::string_view name
         }
       return n ? 100.0 * sum / n : 0.0;
     } );
+  if ( util::str_compare_ci( name, "fist_pack" ) )
+    return make_fn_expr( name, [ this ]() {
+      // stretches of the key spent in a pack of enemies: Spinning Crane Kick instead of Tiger Palm
+      double len = mw->t( "pack_len", 20.0 );
+      return as<double>( std::fmod( sim->current_time().total_seconds(), len ) < len * mw->t( "pack_frac", 0.4 ) );
+    } );
   if ( util::str_compare_ci( name, "rm_count" ) )
     return make_fn_expr( name, [ this ]() { return as<double>( mw->rm_count() ); } );
   if ( util::str_compare_ci( name, "group_size_mw" ) )
@@ -904,6 +1300,31 @@ void monk_t::apl_mw_heal()
   action_priority_list_t* def       = get_action_priority_list( "default" );
   precombat->add_action( "snapshot_stats" );
   precombat->add_action( "renewing_mist" );
+
+  // the action list is built before the actions exist, so the build is read from the talents
+  bool fist_build = find_talent_spell( talent_tree::SPECIALIZATION, "Way of the Crane", MONK_MISTWEAVER )->ok() ||
+                    find_talent_spell( talent_tree::SPECIALIZATION, "Jadefire Teachings", MONK_MISTWEAVER )->ok();
+  if ( fist_build )
+  {
+    // fistweaving: kick for Ancient Teachings / Way of the Crane / Crane Style, heal with the cooldowns
+    def->add_action( "potion" );
+    def->add_action( "use_items" );
+    def->add_action( "invoke_chiji" );
+    def->add_action( "celestial_conduit" );
+    def->add_action( "revival,if=injured_60>=3" );
+    def->add_action( "life_cocoon,if=injured_60>=1" );
+    def->add_action( "mana_tea,if=mana.pct<85" );
+    def->add_action( "thunder_focus_tea" );
+    def->add_action( "renewing_mist,if=rm_count<1" );
+    def->add_action( "rising_sun_kick" );
+    def->add_action( "sheiluns_gift,if=injured_90>=1" );
+    def->add_action( "enveloping_mist,if=buff.tft_mw.up|(buff.chiji_mw.up&injured_80>=1)" );
+    def->add_action( "enveloping_mist,if=injured_60>=1" );
+    def->add_action( "blackout_kick,if=buff.totm_mw.up" );
+    def->add_action( "spinning_crane_kick" );
+    def->add_action( "tiger_palm" );
+    return;
+  }
 
   def->add_action( "potion" );
   def->add_action( "use_items" );

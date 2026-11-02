@@ -7323,10 +7323,11 @@ void monk_t::assess_heal( school_e school, result_amount_type dmg_type, action_s
 
 void monk_t::create_actions()
 {
+  if ( mw_heal_mode() )  // wowhub: the state must exist before the action list is parsed (the actions read it)
+    init_mw_heal();
   base_t::create_actions();
   if ( mw_heal_mode() )  // wowhub
   {
-    init_mw_heal();
     create_mw_heal_actions();
     return;
   }
