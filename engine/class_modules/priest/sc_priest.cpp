@@ -1831,6 +1831,10 @@ struct flash_heal_t final : public priest_heal_t
     }
 
     p().buffs.surge_of_light->decrement();
+
+    // wowhub: Divine Image's Naaru answers a plain Flash Heal about as often as the logs show (4 in 10)
+    if ( !benediction && !binding && priest().holy_heal_mode() && priest().rng().roll( priest().holy_tune( "di_fh_chance", 0.43 ) ) )
+      priest().divine_image_heals( false );
   }
 
   void impact( action_state_t* s ) override
@@ -2897,6 +2901,12 @@ std::unique_ptr<expr_t> priest_t::create_expression( util::string_view expressio
   if ( disc_expression )
   {
     return disc_expression;
+  }
+
+  auto holy_expression = create_expression_holy( expression_str );  // wowhub
+  if ( holy_expression )
+  {
+    return holy_expression;
   }
 
   auto splits = util::string_split<util::string_view>( expression_str, "." );
@@ -4354,6 +4364,7 @@ void priest_t::create_options()
   // Default is 2, minimum of 1 bounce per second, maximum of 1 bounce per 12 seconds (prayer of mending's cooldown)
   add_option( opt_int( "priest.holy_heal_pool", options.holy_heal_pool, 1, 30 ) );
   add_option( opt_int( "priest.holy_serenity_pool", options.holy_serenity_pool, 1, 30 ) );
+  add_option( opt_string( "priest.holy_tune", options.holy_tune ) );  // wowhub
   add_option( opt_float( "priest.prayer_of_mending_bounce_rate", options.prayer_of_mending_bounce_rate, 1, 12 ) );
   add_option( opt_bool( "priest.init_insanity", options.init_insanity ) );
   add_option( opt_float( "priest.twist_of_fate_heal_rppm", options.twist_of_fate_heal_rppm, 0, 120 ) );
