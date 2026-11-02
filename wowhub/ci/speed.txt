@@ -1,0 +1,17 @@
+# Expected time of each test sim / the Arcane Mage sim's time, on GitHub's runners (the higher of the first two
+# clean runs, 2026-11-02). run.sh fails a sim more than 30% slower than this. After a deliberate change that
+# makes a healer slower or faster, copy the new ratios from the CI log here.
+Disc_Priest_Mythic 0.94
+Disc_Priest_Raid 1.63
+Holy_Paladin_Mythic 0.54
+Holy_Paladin_Raid 1.11
+Holy_Priest_Mythic 0.83
+Holy_Priest_Raid 1.37
+Mistweaver_Monk_Mythic 0.71
+Mistweaver_Monk_Raid 1.31
+Preservation_Evoker_Mythic 0.69
+Preservation_Evoker_Raid 1.37
+Resto_Druid_Mythic 0.89
+Resto_Druid_Raid 1.40
+Resto_Shaman_Mythic 1.31
+Resto_Shaman_Raid 2.17
