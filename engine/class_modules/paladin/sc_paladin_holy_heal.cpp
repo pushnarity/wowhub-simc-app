@@ -42,11 +42,53 @@ struct hpal_state_t
   action_t* truth_spill       = nullptr;
   action_t* selfless_heal     = nullptr;
 
+  // Lightsmith (Mythic+) build
+  bool lightsmith = false;
+  bool plain_wog  = false;  // Lightsmith without the Eternal Flame talent casts the plain Word of Glory
+  std::map<std::string, double> tune;  // holy_tune=name=value/name=value
+  double T( const char* n, double d ) const
+  {
+    auto it = tune.find( n );
+    return it == tune.end() ? d : it->second;
+  }
+  struct static_beacon_t { player_t* target; double pct; };
+  std::vector<static_beacon_t> static_beacons;
+  player_talent_t beacon_of_faith, lightforged_blessing, brought_to_light;
+  action_t* sacred_word  = nullptr;
+  action_t* haa_heal     = nullptr;
+  action_t* dg_heal      = nullptr;
+  action_t* lfb_heal     = nullptr;
+  action_t* lfb_self     = nullptr;
+  action_t* btl_heal     = nullptr;
+  action_t* gj_absorb    = nullptr;
+  action_t* armory_absorb = nullptr;
+  gain_t* sotr_mana      = nullptr;
+
+  double lowest_pct() const
+  {
+    double m = 1.0;
+    for ( auto* t : p->sim->healing_no_pet_list )
+      if ( !t->is_sleeping() )
+        m = std::min( m, t->resources.pct( RESOURCE_HEALTH ) );
+    return m;
+  }
+
+  player_t* tank() const
+  {
+    for ( auto* t : p->sim->healing_no_pet_list )
+      if ( !t->is_sleeping() && t->primary_role() == ROLE_TANK )
+        return t;
+    return nullptr;
+  }
+
   explicit hpal_state_t( paladin_t* pl ) : p( pl ) {}
 
   bool on_beacon( player_t* t ) const
   {
     auto it = bov.find( t );
+    for ( auto& b : static_beacons )
+      if ( b.target == t )
+        return true;
     return ( it != bov.end() && it->second->check() ) || t == savior_target;
   }
 
@@ -86,6 +128,7 @@ struct hpal_state_t
 
 namespace hpal
 {
+void heal_cast_extras( paladin_t* p, bool infused );
 // A heal that only carries an amount (beacon transfers, Overflowing Light, Piety-like spills): no multipliers.
 struct flat_heal_t : public heal_t
 {
@@ -197,6 +240,9 @@ struct hpal_heal_t : public paladin_heal_t
         st().beacon_heal->execute_on_target( t, raw * st().bov_pct );
     if ( st().savior_target && st().savior_target != s->target && !st().savior_target->is_sleeping() )
       st().savior_heal->execute_on_target( st().savior_target, raw * st().savior_pct );
+    for ( auto& b : st().static_beacons )
+      if ( b.target != s->target && !b.target->is_sleeping() )
+        st().beacon_heal->execute_on_target( b.target, raw * b.pct );
   }
 
   void impact( action_state_t* s ) override
@@ -260,6 +306,19 @@ struct holy_shock_heal_t : public hpal_heal_t
 struct holy_shock_t : public paladin_spell_t
 {
   holy_shock_heal_t* heal;
+  timespan_t last_cast = timespan_t::from_seconds( -100 );
+  void reset() override
+  {
+    paladin_spell_t::reset();
+    last_cast = timespan_t::from_seconds( -100 );
+  }
+  bool ready() override
+  {
+    if ( p()->hpal->lightsmith &&
+         sim->current_time() - last_cast < timespan_t::from_seconds( p()->hpal->T( "hs_gap", 9.5 ) ) )
+      return false;
+    return paladin_spell_t::ready();
+  }
   holy_shock_t( paladin_t* p, util::string_view options_str )
     : paladin_spell_t( "holy_shock", p, p->find_spell( 20473 ) )
   {
@@ -276,8 +335,18 @@ struct holy_shock_t : public paladin_spell_t
     auto inj    = s.injured( 1 );
     player_t* t = inj.empty() ? s.random_ally() : inj.front();
     paladin_spell_t::execute();
+    last_cast = sim->current_time();
     if ( !t )
       return;
+    // Mythic+: about half the Holy Shocks go on the enemy (Holy Power and the cooldown, no heal)
+    if ( s.lightsmith && ( inj.empty() || t->resources.pct( RESOURCE_HEALTH ) >= s.T( "hs_thr", 0.40 ) ) )
+    {
+      if ( s.infusion_of_light.ok() && rng().roll( s.infusion_of_light->effectN( 1 ).percent() * s.T( "hs_dmg_infusion", 1.0 ) ) )
+        p()->buffs.infusion_of_light->trigger();
+      if ( s.glorious_dawn.ok() && rng().roll( s.glorious_dawn->effectN( 1 ).percent() ) )
+        cooldown->reset( false, 1 );
+      return;
+    }
     heal->execute_on_target( t );
 
     if ( s.glorious_dawn.ok() && rng().roll( s.glorious_dawn->effectN( 1 ).percent() ) )
@@ -292,9 +361,12 @@ struct holy_shock_t : public paladin_spell_t
 struct eternal_flame_t : public holy_power_consumer_t<hpal_heal_t>
 {
   double self_bonus;
-  eternal_flame_t( paladin_t* p, util::string_view n, util::string_view options_str, double eff = 1.0 )
-    : holy_power_consumer_t( n, p, p->find_spell( 156322 ) ),
-      self_bonus( p->find_spell( 156322 )->effectN( 3 ).percent() )
+  bool plain_wog;
+  eternal_flame_t( paladin_t* p, util::string_view n, util::string_view options_str, double eff = 1.0,
+                   unsigned id = 156322 )
+    : holy_power_consumer_t( n, p, p->find_spell( id ) ),
+      self_bonus( id == 156322 ? p->find_spell( 156322 )->effectN( 3 ).percent() : 0.0 ),
+      plain_wog( id != 156322 )
   {
     parse_options( options_str );
     is_wog        = true;
@@ -339,7 +411,8 @@ struct eternal_flame_t : public holy_power_consumer_t<hpal_heal_t>
   {
     holy_power_consumer_t::execute();
     auto& st = *p()->hpal;
-    (void)st;
+    if ( plain_wog && st.sacred_word && !background && p()->buffs.lightsmith.blessing_of_the_forge->up() )
+      st.sacred_word->execute_on_target( execute_state->target );
   }
 };
 
@@ -421,6 +494,8 @@ struct flash_of_light_t : public hpal_heal_t
       m *= 1.0 + st.moment_of_compassion->effectN( 1 ).percent();
     if ( st.selfless_healer.ok() && s->target != player )
       m *= 1.0 + st.selfless_healer->effectN( 1 ).percent();
+    if ( st.lightsmith )
+      m *= st.T( "fol_scale", 1.5 );
     return m;
   }
 
@@ -443,6 +518,7 @@ struct flash_of_light_t : public hpal_heal_t
   {
     bool infused = p()->buffs.infusion_of_light->check();
     hpal_heal_t::execute();
+    heal_cast_extras( p(), infused );
     if ( infused )
     {
       p()->buffs.infusion_of_light->decrement();
@@ -619,6 +695,308 @@ struct truth_prevails_t : public hpal_heal_t
     }
   }
 };
+
+// ==========================================================================
+// Lightsmith / Mythic+ build
+// ==========================================================================
+
+// A heal with its own spell-power coefficient (heals the game triggers without a usable coefficient in the data)
+struct coef_heal_t : public hpal_heal_t
+{
+  double coef, mult;
+  coef_heal_t( paladin_t* p, util::string_view n, unsigned id, double c, bool beacon = false, double m = 1.0 )
+    : hpal_heal_t( n, p, p->find_spell( id ) ), coef( c ), mult( m )
+  {
+    background = proc = true;
+    auto_target       = false;
+    beacons           = beacon;
+    aoe               = 0;
+    spell_power_mod.direct = c;
+  }
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    return hpal_heal_t::composite_da_multiplier( s ) * mult;
+  }
+};
+
+// Word of Glory (no Eternal Flame in this build) is eternal_flame_t with the plain spell.
+
+
+// Holy Light: the big slow heal; Infusion of Light shortens it
+struct holy_light_hp_t : public hpal_heal_t
+{
+  holy_light_hp_t( paladin_t* p, util::string_view options_str )
+    : hpal_heal_t( "holy_light", p, p->find_specialization_spell( "Holy Light" ) )
+  {
+    parse_options( options_str );
+  }
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    double m = hpal_heal_t::composite_da_multiplier( s );
+    auto& st = *p()->hpal;
+    if ( st.moment_of_compassion.ok() && st.on_beacon( s->target ) )
+      m *= 1.0 + st.moment_of_compassion->effectN( 1 ).percent();
+    if ( st.selfless_healer.ok() && s->target != player )
+      m *= 1.0 + st.selfless_healer->effectN( 1 ).percent();
+    return m * st.T( "hl_scale", 0.69 );
+  }
+  timespan_t execute_time() const override
+  {
+    timespan_t t = hpal_heal_t::execute_time();
+    if ( p()->buffs.infusion_of_light->check() )
+      t += p()->buffs.infusion_of_light->data().effectN( 1 ).time_value();
+    return std::max( 0_ms, t );
+  }
+  void impact( action_state_t* s ) override
+  {
+    hpal_heal_t::impact( s );
+    auto& st = *p()->hpal;
+    if ( st.selfless_healer.ok() && s->target != player )
+      st.selfless_heal->execute_on_target( player, s->result_total * st.selfless_healer->effectN( 2 ).percent() );
+  }
+  void execute() override
+  {
+    bool infused = p()->buffs.infusion_of_light->check();
+    hpal_heal_t::execute();
+    heal_cast_extras( p(), infused );
+    if ( infused )
+    {
+      p()->buffs.infusion_of_light->expire();
+      if ( p()->hpal->imbued_infusions.ok() )
+        p()->cooldowns.holy_shock->adjust(
+            timespan_t::from_millis( p()->hpal->imbued_infusions->effectN( 1 ).base_value() ) );
+    }
+  }
+};
+
+// Sum of the spender's after-effects: Divine Guidance heals after Judgment / Hammer of Wrath, the shockwave of
+// Hammer and Anvil, Lightforged Blessing after Shield of the Righteous.
+void divine_guidance_heal( paladin_t* p )
+{
+  auto& st = *p->hpal;
+  if ( !st.dg_heal )
+    return;
+  int stacks = p->buffs.lightsmith.divine_guidance->check();
+  if ( stacks <= 0 || !p->rng().roll( st.T( "dg_prob", 0.77 ) ) )
+    return;
+  auto l = st.injured( 3 );
+  for ( auto* t : l )
+    st.dg_heal->execute_on_target( t, 0.0 );
+  p->buffs.lightsmith.divine_guidance->expire();
+}
+
+// The shockwave heals everyone around (full health too: 54% of it is overhealing in the logs)
+void hammer_and_anvil_heal( paladin_t* p, double scale = 1.0 )
+{
+  auto& st = *p->hpal;
+  if ( !st.haa_heal )
+    return;
+  auto* h = static_cast<coef_heal_t*>( st.haa_heal );
+  double keep = h->mult;
+  h->mult = keep * scale;
+  int n = 0;
+  for ( auto* t : p->sim->healing_no_pet_list )
+    if ( !t->is_sleeping() && n++ < 4 )
+      st.haa_heal->execute_on_target( t );
+  st.haa_heal->execute_on_target( p );
+  h->mult = keep;
+}
+
+
+// Flash of Light / Holy Light in the Lightsmith build: Tower of Radiance's Holy Power, Valiance on consuming Infusion
+void heal_cast_extras( paladin_t* p, bool infused )
+{
+  auto& st = *p->hpal;
+  if ( !st.lightsmith )
+    return;
+  p->resource_gain( RESOURCE_HOLY_POWER, 1, p->get_gain( "tower_of_radiance" ) );
+  if ( infused && p->talents.lightsmith.valiance->ok() )
+    p->cooldowns.holy_armaments->adjust(
+        -timespan_t::from_millis( p->talents.lightsmith.valiance->effectN( 1 ).base_value() * st.T( "valiance_mult", 1.6 ) ) );
+}
+
+struct divine_guidance_heal_t : public coef_heal_t
+{
+  divine_guidance_heal_t( paladin_t* p, double c ) : coef_heal_t( p, "divine_guidance_heal", 1310389, c, false ) {}
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    return coef_heal_t::composite_da_multiplier( s );
+  }
+};
+
+// Shield of the Righteous (the Holy version): Holy Power spender that takes 2 s off Holy Shock, gives mana and
+// triggers Lightforged Blessing
+struct shield_of_the_righteous_hp_t : public holy_power_consumer_t<paladin_spell_t>
+{
+  shield_of_the_righteous_hp_t( paladin_t* p, util::string_view options_str )
+    : holy_power_consumer_t( "shield_of_the_righteous", p, p->find_spell( 415091 ) )
+  {
+    parse_options( options_str );
+    is_sotr  = true;
+    harmful  = false;
+    may_miss = may_crit = false;
+    base_dd_min = base_dd_max = 0;
+    spell_power_mod.direct = attack_power_mod.direct = 0;
+    // the mana is a separate spell (1270617); the data holds its size
+  }
+
+  void execute() override
+  {
+    holy_power_consumer_t::execute();
+    auto& st = *p()->hpal;
+    p()->cooldowns.holy_shock->adjust( -timespan_t::from_millis( data().effectN( 4 ).base_value() ) );
+    p()->resource_gain( RESOURCE_MANA, st.T( "sotr_mana", 2850.0 ), st.sotr_mana );
+    if ( st.lfb_heal )
+    {
+      st.lfb_self->execute_on_target( p() );
+      for ( auto* t : st.injured( 2, p() ) )
+        st.lfb_heal->execute_on_target( t );
+    }
+  }
+};
+
+// Lay on Hands: heals about the paladin's own maximum health on the most hurt ally when someone is about to die
+struct lay_on_hands_hp_t : public paladin_spell_t
+{
+  action_t* heal;
+  lay_on_hands_hp_t( paladin_t* p, util::string_view options_str )
+    : paladin_spell_t( "lay_on_hands", p, p->find_spell( 633 ) ), heal( new flat_heal_t( p, "lay_on_hands_heal", 633 ) )
+  {
+    parse_options( options_str );
+    harmful  = false;
+    may_miss = may_crit = false;
+    cooldown = p->cooldowns.lay_on_hands;
+    add_child( heal );
+  }
+  void execute() override
+  {
+    paladin_spell_t::execute();
+    auto l = p()->hpal->injured( 1 );
+    if ( !l.empty() )
+      heal->execute_on_target( l.front(), p()->resources.max[ RESOURCE_HEALTH ] * p()->hpal->T( "loh_pct", 0.91 ) );
+  }
+};
+
+// Hammer of Wrath: Avenging Wrath windows only
+struct hammer_of_wrath_hp_t : public paladin_spell_t
+{
+  hammer_of_wrath_hp_t( paladin_t* p, util::string_view options_str )
+    : paladin_spell_t( "hammer_of_wrath", p, p->find_spell( 1241413 ) )
+  {
+    parse_options( options_str );
+    harmful  = false;
+    may_miss = false;
+    base_dd_min = base_dd_max = 0;
+    spell_power_mod.direct = attack_power_mod.direct = 0;
+  }
+  bool ready() override
+  {
+    return p()->buffs.avenging_wrath->check() && paladin_spell_t::ready();
+  }
+  void execute() override
+  {
+    paladin_spell_t::execute();
+    auto& st = *p()->hpal;
+    p()->resource_gain( RESOURCE_HOLY_POWER, 1, p()->get_gain( "hammer_of_wrath" ) );
+    if ( rng().roll( st.T( "haa_how", 0.95 ) ) )
+      hammer_and_anvil_heal( p() );
+    divine_guidance_heal( p() );
+  }
+};
+
+// Judgment: Greater Judgment's shield on an ally, Hammer and Anvil on a crit, Divine Guidance's heals
+struct judgment_lightsmith_t : public paladin_spell_t
+{
+  action_t* dmg;
+  timespan_t last_cast = timespan_t::from_seconds( -100 );
+  void reset() override
+  {
+    paladin_spell_t::reset();
+    last_cast = timespan_t::from_seconds( -100 );
+  }
+  bool ready() override
+  {
+    if ( sim->current_time() - last_cast < timespan_t::from_seconds( p()->hpal->T( "judg_gap", 8.0 ) ) )
+      return false;
+    return paladin_spell_t::ready();
+  }
+  judgment_lightsmith_t( paladin_t* p, util::string_view options_str )
+    : paladin_spell_t( "judgment_lightsmith", p, p->find_spell( 275773 ) ),
+      dmg( p->create_action_holy( "judgment", "" ) )
+  {
+    parse_options( options_str );
+    harmful  = false;
+    may_miss = may_crit = false;
+    base_dd_min = base_dd_max = 0;
+    spell_power_mod.direct    = 0;
+    dmg->background           = true;
+    dmg->cooldown             = p->get_cooldown( "judgment_damage" );
+    add_child( dmg );
+  }
+  void execute() override
+  {
+    paladin_spell_t::execute();
+    auto& st = *p()->hpal;
+    last_cast = sim->current_time();
+    p()->resource_gain( RESOURCE_HOLY_POWER, 1, p()->get_gain( "judgment_lightsmith" ) );
+    if ( rng().roll( st.T( "judg_hp2", 0.6 ) ) )
+      p()->resource_gain( RESOURCE_HOLY_POWER, 1, p()->get_gain( "judgment_lightsmith" ) );
+    dmg->execute_on_target( dmg->target );
+    if ( p()->sets->has_set_bonus( PALADIN_HOLY, MID2, B4 ) &&
+         rng().roll( p()->sets->set( PALADIN_HOLY, MID2, B4 )->effectN( 1 ).percent() ) )
+      p()->buffs.infusion_of_light->trigger();
+    if ( st.gj_absorb && p()->talents.greater_judgment->ok() )
+    {
+      auto l = st.injured( 1 );
+      player_t* t = l.empty() ? st.tank() : l.front();
+      if ( rng().roll( st.T( "gj_tank", 0.5 ) ) && st.tank() )
+        t = st.tank();
+      if ( t )
+        st.gj_absorb->execute_on_target( t, p()->find_spell( 231644 )->effectN( 1 ).base_value() / 100.0 *
+                                                p()->cache.spell_power( SCHOOL_HOLY ) *
+                                                p()->composite_spell_power_multiplier() *
+                                                ( 1.0 + p()->cache.heal_versatility() ) * st.T( "gj_scale", 4.7 ) );
+    }
+    if ( rng().roll( st.T( "haa_judg", 0.95 ) ) )
+      hammer_and_anvil_heal( p() );
+    divine_guidance_heal( p() );
+  }
+};
+
+// Holy Armaments: the armament alternates; Bulwark goes on the tank (and the paladin, Solidarity), Sacred Weapon on
+// the paladin (a dummy target never fights)
+struct holy_armaments_hp_t : public paladin_spell_t
+{
+  holy_armaments_hp_t( paladin_t* p, util::string_view options_str )
+    : paladin_spell_t( "holy_armaments", p, p->find_spell( 432459 ) )
+  {
+    parse_options( options_str );
+    harmful            = false;
+    name_str_reporting = "Holy Armaments";
+  }
+  timespan_t execute_time() const override
+  {
+    return p()->active.armament[ p()->next_armament ]->execute_time();
+  }
+  void execute() override
+  {
+    auto& st = *p()->hpal;
+    paladin_spell_t::execute();
+    player_t* t = p();
+    if ( p()->next_armament == HOLY_BULWARK )
+    {
+      player_t* tk = st.tank();
+      auto l = st.injured( 1 );
+      if ( tk && ( l.empty() || rng().roll( st.T( "bulwark_tank", 0.6 ) ) ) )
+        t = tk;
+      else if ( !l.empty() )
+        t = l.front();
+    }
+    p()->cast_holy_armaments( t, p()->next_armament, LS_HARDCAST );
+    hammer_and_anvil_heal( p(), st.T( "haa_arms", 1.0 ) );
+  }
+};
+
 }  // namespace hpal
 
 // ==========================================================================
@@ -633,6 +1011,16 @@ void paladin_t::init_holy_heal()
 {
   hpal   = new hpal_state_t( this );
   auto& s = *hpal;
+  for ( auto& kv : util::string_split<std::string_view>( options.holy_tune, "/" ) )
+  {
+    auto pr = util::string_split<std::string_view>( kv, "=" );
+    if ( pr.size() == 2 )
+      s.tune[ std::string( pr[ 0 ] ) ] = util::to_double( pr[ 1 ] );
+  }
+  s.lightsmith = talents.lightsmith.holy_armaments->ok();
+  s.plain_wog  = s.lightsmith && !find_talent_spell( talent_tree::CLASS, "Eternal Flame" ).ok();
+  if ( s.lightsmith )
+    options.fake_solidarity = false;  // the real allies get the armaments, not a stack of stand-ins
   auto ST = [ this ]( std::string_view n ) { return find_talent_spell( talent_tree::SPECIALIZATION, n ); };
   auto CT = [ this ]( std::string_view n ) { return find_talent_spell( talent_tree::CLASS, n ); };
   s.reclamation          = ST( "Reclamation" );
@@ -656,6 +1044,9 @@ void paladin_t::init_holy_heal()
   s.extrication          = ST( "Extrication" );
   s.light_of_dawn        = ST( "Light of Dawn" );
   s.selfless_healer      = CT( "Selfless Healer" );
+  s.beacon_of_faith      = ST( "Beacon of Faith" );
+  s.lightforged_blessing = CT( "Lightforged Blessing" );
+  s.brought_to_light     = CT( "Brought to Light" );
   s.afterimage           = CT( "Afterimage" );
   // the three Beacon of the Savior nodes share a name: pick them by spell id
   for ( unsigned id : { 1244878u, 1245368u, 1245367u } )
@@ -670,6 +1061,11 @@ void paladin_t::init_holy_heal()
   // (25.5k raw a hit) fits that, not the second Savior node's or Commanding Light's extra share
   s.bov_pct    = find_spell( 53651 )->effectN( 1 ).percent();
   s.savior_pct = s.savior.ok() ? s.savior->effectN( 2 ).percent() : 0.0;
+}
+
+double paladin_t::bulwark_heal_scale() const
+{
+  return holy_heal_mode() && hpal && hpal->lightsmith ? hpal->T( "bulwark_scale", 1.1 ) : 1.0;
 }
 
 double paladin_t::savior_shield_amount() const
@@ -715,8 +1111,27 @@ void paladin_t::create_holy_heal_actions()
   if ( s.afterimage.ok() )
   {
     // the shared Holy Power code counts the Holy Power and fires active.afterimage
-    s.ef_echo         = new hpal::eternal_flame_t( this, "eternal_flame_afterimage", "", s.afterimage->effectN( 1 ).percent() );
+    if ( s.plain_wog )
+      s.ef_echo = new hpal::eternal_flame_t( this, "word_of_glory_afterimage", "", s.afterimage->effectN( 1 ).percent(), 85673 );
+    else
+      s.ef_echo = new hpal::eternal_flame_t( this, "eternal_flame_afterimage", "", s.afterimage->effectN( 1 ).percent() );
     active.afterimage = s.ef_echo;
+  }
+  if ( s.lightsmith )
+  {
+    s.sotr_mana = get_gain( "shield_of_the_righteous_mana" );
+    s.sacred_word = new hpal::coef_heal_t( this, "sacred_word", 447246, find_spell( 447246 )->effectN( 1 ).sp_coeff(), true, s.T( "sw_scale", 1.0 ) );
+    s.haa_heal = new hpal::coef_heal_t( this, "hammer_and_anvil_heal", 433722, find_spell( 433722 )->effectN( 1 ).sp_coeff(), false, s.T( "haa_scale", 1.0 ) );
+    s.dg_heal  = new hpal::divine_guidance_heal_t( this, s.T( "dg_coef", 2.8 ) );
+    if ( s.lightforged_blessing.ok() )
+    {
+      s.lfb_heal = new hpal::coef_heal_t( this, "lightforged_blessing", 403460, 0.0, false, s.T( "lfb_mult", 0.8 ) );
+      s.lfb_self = new hpal::coef_heal_t( this, "lightforged_blessing_self", 407467, 0.0, false, s.T( "lfb_mult", 0.8 ) );
+    }
+    if ( s.brought_to_light.ok() )
+      s.btl_heal = new hpal::coef_heal_t( this, "brought_to_light", 1265595, 0.0, false, s.T( "btl_mult", 0.16 ) );
+    if ( talents.greater_judgment->ok() )
+      s.gj_absorb = new hpal::flat_absorb_t( this, "greater_judgment", 414019 );
   }
   s.truth_heal  = new hpal::truth_prevails_t( this );
   s.truth_spill = new hpal::flat_heal_t( this, "truth_prevails_spill", 461529 );
@@ -735,6 +1150,35 @@ void paladin_t::create_holy_heal_actions()
     auto& st         = *hpal;
     st.savior_target = nullptr;
     st.afterimage_spent = 0;
+    st.static_beacons.clear();
+    if ( st.lightsmith )
+    {
+      // Beacon of Light (and Faith) sit on allies other than the paladin: the log's transfers go to two non-tanks
+      std::vector<player_t*> pick;
+      for ( auto* t : sim->healing_no_pet_list )
+        if ( !t->is_sleeping() && t->primary_role() != ROLE_TANK )
+          pick.push_back( t );
+      if ( pick.empty() )
+        for ( auto* t : sim->healing_no_pet_list )
+          if ( !t->is_sleeping() )
+            pick.push_back( t );
+      double pct = find_spell( 53651 )->effectN( 1 ).percent() * st.T( "beacon_scale", 1.0 );
+      if ( !pick.empty() )
+        st.static_beacons.push_back( { pick[ 0 ], pct } );
+      if ( st.beacon_of_faith.ok() && pick.size() > 1 )
+        st.static_beacons.push_back( { pick[ 1 ], pct * ( 1.0 - find_spell( 156910 )->effectN( 4 ).percent() ) } );
+      if ( st.btl_heal )
+      {
+        // kills: Brought to Light heals the paladin and 5 allies; about one pull-kill every 13 s
+        double every = st.T( "btl_every", 13.0 );
+        make_repeating_event( *sim, timespan_t::from_seconds( every ), [ this ] {
+          auto& st = *hpal;
+          st.btl_heal->execute_on_target( this );
+          for ( auto* t : st.injured( 5 ) )
+            st.btl_heal->execute_on_target( t );
+        } );
+      }
+    }
     make_repeating_event( *sim, 2_s, [ this ] {
       auto& st = *hpal;
       if ( st.savior.ok() )
@@ -782,13 +1226,15 @@ void paladin_t::create_holy_heal_actions()
         double share = st.glistening_radiance->effectN( 1 ).percent();
         auto give    = [ & ]( player_t* t ) {
           if ( t->resources.pct( RESOURCE_HEALTH ) >= 1.0 )
-            st.glisten->execute_on_target( t, t->max_health() * share );
+            st.glisten->execute_on_target( t, t->max_health() * share * ( st.lightsmith ? st.T( "gr_scale", 1.55 ) : 1.0 ) );
         };
         for ( auto& [ t, b ] : st.bov )
           if ( b->check() )
             give( t );
         if ( st.savior_target )
           give( st.savior_target );
+        for ( auto& b : st.static_beacons )
+          give( b.target );
       } );
     if ( st.bestow )
       make_repeating_event( *sim, 5_s, [ this ] {
@@ -804,7 +1250,11 @@ action_t* paladin_t::create_action_holy_heal( util::string_view name, util::stri
   if ( name == "holy_shock" )
     return new hpal::holy_shock_t( this, options_str );
   if ( name == "eternal_flame" || name == "word_of_glory" )
+  {
+    if ( hpal->plain_wog )
+      return new hpal::eternal_flame_t( this, "word_of_glory", options_str, 1.0, 85673 );
     return new hpal::eternal_flame_t( this, "eternal_flame", options_str );
+  }
   if ( name == "light_of_dawn" )
     return new hpal::light_of_dawn_heal_t( this, "light_of_dawn", options_str );
   if ( name == "flash_of_light" )
@@ -814,7 +1264,21 @@ action_t* paladin_t::create_action_holy_heal( util::string_view name, util::stri
   if ( name == "divine_toll" )
     return new hpal::divine_toll_heal_t( this, options_str );
   if ( name == "judgment" )
+  {
+    if ( hpal->lightsmith )
+      return new hpal::judgment_lightsmith_t( this, options_str );
     return new hpal::judgment_truth_t( this, options_str );
+  }
+  if ( name == "holy_light" )
+    return new hpal::holy_light_hp_t( this, options_str );
+  if ( name == "shield_of_the_righteous" )
+    return new hpal::shield_of_the_righteous_hp_t( this, options_str );
+  if ( name == "holy_armaments" && hpal->lightsmith )
+    return new hpal::holy_armaments_hp_t( this, options_str );
+  if ( name == "hammer_of_wrath" )
+    return new hpal::hammer_of_wrath_hp_t( this, options_str );
+  if ( name == "lay_on_hands" && hpal->lightsmith )
+    return new hpal::lay_on_hands_hp_t( this, options_str );
   return nullptr;
 }
 
@@ -826,6 +1290,26 @@ void paladin_t::apl_holy_heal()
   action_priority_list_t* precombat = get_action_priority_list( "precombat" );
   action_priority_list_t* def       = get_action_priority_list( "default" );
   precombat->add_action( "snapshot_stats" );
+
+  if ( hpal->lightsmith )
+  {
+    // Mythic+ Lightsmith, measured on top +23/+24 keys: the player is on the global cooldown all fight; Holy Power
+    // goes into Word of Glory when someone is hurt and into Shield of the Righteous otherwise (mana, Holy Shock
+    // cooldown); Holy Shock is half damage; Flash of Light / Holy Light fill.
+    def->add_action( "potion" );
+    def->add_action( "use_items" );
+    def->add_action( "avenging_wrath" );
+    def->add_action( "lay_on_hands,if=min_health_pct<35" );
+    def->add_action( "holy_armaments" );
+    def->add_action( "word_of_glory,if=holy_power>=3&min_health_pct<50" );
+    def->add_action( "shield_of_the_righteous,if=holy_power>=3" );
+    def->add_action( "holy_shock" );
+    def->add_action( "hammer_of_wrath" );
+    def->add_action( "judgment" );
+    def->add_action( "holy_light,if=min_health_pct<60&mana.pct>=25" );
+    def->add_action( "flash_of_light,if=min_health_pct<42|(buff.infusion_of_light.up&min_health_pct<58)" );
+    return;
+  }
 
   def->add_action( "potion" );
   def->add_action( "use_items" );

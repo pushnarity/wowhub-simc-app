@@ -4961,6 +4961,7 @@ void paladin_t::create_options()
   add_option( opt_float( "reflection_of_radiance_proc_chance_holy_bulwark", options.reflection_of_radiance_proc_chance_holy_bulwark, 0, 1 ) );
   add_option( opt_float( "ror_bulwark_additional_proc_chance", options.ror_bulwark_additional_proc_chance, 0, 1 ) );
   add_option( opt_string( "starting_armament", options.starting_armament ) );
+  add_option( opt_string( "holy_tune", options.holy_tune ) );  // wowhub
   add_option( opt_bool( "max_range_apex", options.max_range_apex ) );
 
   player_t::create_options();
@@ -5333,6 +5334,15 @@ std::unique_ptr<expr_t> paladin_t::create_expression( util::string_view name_str
     splits[ 1 ] = talents.sentinel->ok() ? "sentinel" : "avenging_wrath";
     return paladin_t::create_expression( util::string_join( splits, "." ) );
   }
+
+  if ( specialization() == PALADIN_HOLY && util::str_compare_ci( name_str, "min_health_pct" ) )  // wowhub
+    return make_fn_expr( name_str, [ this ]() {
+      double m = 100.0;
+      for ( auto* t : sim->healing_no_pet_list )
+        if ( !t->is_sleeping() )
+          m = std::min( m, 100.0 * t->resources.pct( RESOURCE_HEALTH ) );
+      return m;
+    } );
 
   return player_t::create_expression( name_str );
 }
