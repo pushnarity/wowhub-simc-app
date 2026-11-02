@@ -485,8 +485,12 @@ struct flash_of_light_t : public hpal_heal_t
     auto& st = *p()->hpal;
     if ( p()->buffs.infusion_of_light->check() )
     {
-      // the buff's value already carries the tier 2-piece's +100% (log: 300% more healing, not 400%)
-      m *= 1.0 + p()->buffs.infusion_of_light->data().effectN( 1 ).percent();
+      // the buff's value already carries the tier 2-piece's +100% (log: 300% more healing, not 400%),
+      // so without the 2-piece it comes off
+      double inf = p()->buffs.infusion_of_light->data().effectN( 1 ).percent();
+      if ( !p()->sets->has_set_bonus( PALADIN_HOLY, MID2, B2 ) )
+        inf -= p()->sets->set( PALADIN_HOLY, MID2, B2 )->effectN( 1 ).percent();
+      m *= 1.0 + inf;
       if ( st.divine_revelations.ok() )
         m *= 1.0 + st.divine_revelations->effectN( 2 ).percent();
     }
@@ -766,6 +770,10 @@ struct holy_light_hp_t : public hpal_heal_t
         p()->cooldowns.holy_shock->adjust(
             timespan_t::from_millis( p()->hpal->imbued_infusions->effectN( 1 ).base_value() ) );
     }
+    // tier 4-piece: Holy Light grants Infusion of Light (its +50% mana cost comes from the spell data)
+    if ( p()->sets->has_set_bonus( PALADIN_HOLY, MID2, B4 ) &&
+         rng().roll( p()->sets->set( PALADIN_HOLY, MID2, B4 )->effectN( 2 ).percent() ) )
+      p()->buffs.infusion_of_light->trigger();
   }
 };
 
