@@ -1504,6 +1504,15 @@ struct priest_heal_t : public priest_action_t<heal_t>
     return base_t::pick_target();
   }
 
+  // wowhub: periodic heals (Renew, Echo of Light) feed Piety too
+  void assess_damage( result_amount_type type, action_state_t* s ) override
+  {
+    base_t::assess_damage( type, s );
+    if ( type == result_amount_type::HEAL_OVER_TIME && p().specialization() == PRIEST_HOLY && piety_source &&
+         p().talents.oracle.piety.enabled() && s->result_total > s->result_amount )
+      p().trigger_piety( s->result_total - s->result_amount );
+  }
+
   // wowhub: Renewed Faith - the priest's healing on allies with her Renew is increased
   double composite_target_multiplier( player_t* t ) const override
   {

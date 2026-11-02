@@ -229,10 +229,10 @@ struct divine_hymn_pulse_t final : public priest_heal_t
     aoe          = -1;
   }
 
-  // the spell data coefficient is the whole channel's worth; a pulse is a fifth (logs: ~0.9 per pulse)
+  // the spell data coefficient is the whole channel's worth; a pulse is 0.4 (logs: ~1.8 per pulse)
   double composite_da_multiplier( const action_state_t* s ) const override
   {
-    return priest_heal_t::composite_da_multiplier( s ) * 0.2;
+    return priest_heal_t::composite_da_multiplier( s ) * 0.4;
   }
 };
 
@@ -996,6 +996,8 @@ void priest_t::apl_holy_heal()
   default_->add_action( "use_item,use_off_gcd=1,slot=trinket1,if=variable.trinket_1_ogcd_cast&gcd.remains>=0.75*gcd.max" );
   default_->add_action( "use_item,use_off_gcd=1,slot=trinket2,if=variable.trinket_2_ogcd_cast&gcd.remains>=0.75*gcd.max" );
   default_->add_action( "divine_hymn,if=group_size>=10&time>15" );
+  default_->add_action( "holy_word_chastise" );
+  default_->add_action( "holy_fire,if=buff.empyreal_blaze.up" );
   default_->add_action( "apotheosis,if=cooldown.holy_word_serenity.charges_fractional<1.5" );
   default_->add_action( "holy_word_serenity" );
   default_->add_action( "prayer_of_mending" );

@@ -1779,6 +1779,15 @@ struct flash_heal_t final : public priest_heal_t
     return priest_heal_t::ready();
   }
 
+  // wowhub: Words of the Wise's Flash Heal bonus is the Discipline half of the talent; Holy gets Serenity's only
+  double composite_da_multiplier( const action_state_t* s ) const override
+  {
+    double m = priest_heal_t::composite_da_multiplier( s );
+    if ( priest().specialization() == PRIEST_HOLY && priest().talents.oracle.words_of_the_wise.enabled() )
+      m /= 1.0 + priest().talents.oracle.words_of_the_wise->effectN( 2 ).percent();
+    return m;
+  }
+
   void init() override
   {
     priest_heal_t::init();
