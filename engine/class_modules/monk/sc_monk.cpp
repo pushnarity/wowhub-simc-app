@@ -7147,11 +7147,13 @@ stat_e monk_t::convert_hybrid_stat( stat_e s ) const
         case MONK_BREWMASTER:
         case MONK_WINDWALKER:
           return STAT_AGILITY;
+        case MONK_MISTWEAVER:  // wowhub: Mistweavers wear their gear's Intellect, as in the game
+          return STAT_INTELLECT;
         default:
           return STAT_NONE;
       }
     case STAT_AGI_INT:
-      return STAT_AGILITY;
+      return specialization() == MONK_MISTWEAVER ? STAT_INTELLECT : STAT_AGILITY;  // wowhub
     case STAT_STR_AGI:
       return STAT_AGILITY;
     case STAT_STR_INT:
