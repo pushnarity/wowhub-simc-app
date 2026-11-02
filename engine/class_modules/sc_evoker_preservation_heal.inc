@@ -9,9 +9,9 @@ namespace pres_heal
 constexpr int dream_breath_targets   = 6;    // allies one Dream Breath reaches (log: 6 per cast)
 constexpr int dream_breath_echo_targets = 14;  // an Echoed Dream Breath reaches many more (log: 12-14)
 constexpr double consume_flame_scale = 0.85;  // log: 81.6k raw per detonation against 92.8k from the data
+constexpr double golden_hour_scale = 0.77;  // log: 38k raw per Golden Hour against 50k from the replayed damage
 constexpr int blossom_targets        = 6;    // Emerald Blossom hits per cast (log: 6.4)
 constexpr int seedlings_per_blossom  = 4;    // Fluttering Seedlings per Emerald Blossom (log: 4.0)
-constexpr double merithra_extra_hits = 2.7;  // chain hits per ally after the first one (log: 3.7 in all)
 }  // namespace pres_heal
 
 struct pres_state_t
@@ -38,6 +38,10 @@ struct pres_state_t
   action_t *seedling = nullptr, *panacea_heal = nullptr, *ta_shield = nullptr;
 
   action_t* echo_twin = nullptr;
+  double stasis_start = 0;
+  bool stasis_on = false;  // Stasis stores the next three Dream Breath / Temporal Anomaly casts
+  std::vector<std::function<void()>> stored;
+  double merithra_chance = 0.10;  // data 20%; logs show 7-20% of Essence casts end in a Merithra's Blessing
 
   explicit pres_state_t( evoker_t* pl ) : p( pl ) {}
 
@@ -101,6 +105,20 @@ struct pres_state_t
       if ( b->check() && !t->is_sleeping() && ( !best || t->resources.pct( RESOURCE_HEALTH ) < best->resources.pct( RESOURCE_HEALTH ) ) )
         best = t;
     return best;
+  }
+
+  // The next Echo-able heal repeats on every Echoed ally (log: Merithra's Blessing hits 17 allies once and then
+  // chains again from each Echoed one).
+  std::vector<std::pair<player_t*, double>> take_echoes()
+  {
+    std::vector<std::pair<player_t*, double>> l;
+    for ( auto& [ t, b ] : echo )
+      if ( b->check() && !t->is_sleeping() )
+      {
+        l.emplace_back( t, b->check_value() );
+        b->expire();
+      }
+    return l;
   }
 
   double take_echo( player_t* t )
@@ -196,6 +214,12 @@ struct pres_heal_t : public heals::evoker_heal_t
     return n;
   }
 
+  // Logs: heals crit 51% of the time, the stat sheet alone gives 41% (Rune of Critical Power etc. are in; the rest is not found)
+  double composite_crit_chance() const override
+  {
+    return evoker_heal_t::composite_crit_chance() + 0.10;
+  }
+
   // Critical heals are 270% in the logs (Essence Burst's Exhilarating Burst and a gem on top of the 200%)
   double total_crit_bonus( const action_state_t* ) const override
   {
@@ -208,9 +232,11 @@ struct pres_heal_t : public heals::evoker_heal_t
     return evoker_action_t<heal_t>::composite_target_multiplier( t ) * ( 1.0 + p()->cache.mastery_value() );
   }
 
+  double cal = 1.0;  // fitted per spell against the mean heal of the log (the spec aura's -20% only fits some spells)
+
   double mult() const
   {
-    return eff;  // talent and tier modifiers come with the spell data ("Affected By" in the report)
+    return eff * cal;  // talent and tier modifiers come with the spell data ("Affected By" in the report)
   }
 
   double composite_da_multiplier( const action_state_t* s ) const override
@@ -245,6 +271,7 @@ struct twin_flame_heal_t : public pres_heal_t
     background = true;
     green      = false;
     auto_target = true;
+    random_targets = true;
     aoe = p->talent.flameshaper.fire_torrent.ok() ? 1 + as<int>( p->talent.flameshaper.fire_torrent->effectN( 1 ).base_value() ) : 1;
   }
 
@@ -252,7 +279,7 @@ struct twin_flame_heal_t : public pres_heal_t
   {
     pres_heal_t::execute();
     // 12.1 Preservation tier 2-piece: consuming Essence Burst sends a Living Flame as well
-    if ( st().lf_set )
+    if ( st().lf_set && rng().roll( 0.74 ) )  // log: 56 tier Living Flames for 76 Essence Burst consumptions
       st().lf_set->execute_on_target( target );
   }
 };
@@ -266,6 +293,7 @@ struct living_flame_hit_t : public pres_heal_t
     auto_target       = true;
     green             = false;
     dot_duration      = base_tick_time = 0_ms;  // Ruby Embers is a Devastation talent
+    cal               = 1.1;
   }
   int n_targets() const override
   {
@@ -311,8 +339,9 @@ struct dream_breath_hot_t : public pres_heal_t
     background = true;
     eff        = e;
     auto_target = true;
+    cal            = 1.22;
     random_targets = true;  // the cone catches whoever stands in it
-    aoe        = e < 1.0 || n.find( "echo" ) != std::string_view::npos ? dream_breath_echo_targets : dream_breath_targets;
+    aoe        = dream_breath_targets;
     dot_duration   = 14_s + timespan_t::from_seconds( p->pres->deep_exhalation->ok() ? p->pres->deep_exhalation->effectN( 2 ).base_value() / 1000.0 : 0.0 );
     spell_power_mod.direct = 0;  // the log has no separate first hit: the first tick lands on the cast
     base_tick_time = 2_s;
@@ -342,6 +371,7 @@ struct dream_breath_t : public pres_heal_t
     if ( p->pres->legacy->ok() )
       cooldown->charges = 2;
     cooldown->duration = 30_s;
+    cooldown->hasted   = true;  // logs: a Dream Breath charge comes back about every 23 s at 30% haste
     gcd_type = gcd_haste_type::NONE;
     trigger_gcd = 500_ms;
     may_crit = false;
@@ -360,10 +390,12 @@ struct dream_breath_t : public pres_heal_t
     pres_heal_t::execute();
     player_t* tgt = target;
     hot->execute_on_target( tgt );
-    if ( double e = st().take_echo( tgt ) ; e > 0 )
+    // logs: an Echoed Dream Breath is repeated once, not once per Echoed ally
+    auto echoes = st().take_echoes();
+    if ( !echoes.empty() )
     {
-      static_cast<pres_heal_t*>( echo_hot )->eff = e;
-      echo_hot->execute_on_target( tgt );
+      static_cast<pres_heal_t*>( echo_hot )->eff = echoes.front().second;
+      echo_hot->execute_on_target( echoes.front().first );
     }
     if ( st().merithra_3->ok() )
       st().merithra->trigger();
@@ -381,6 +413,15 @@ struct mana_essence_t : public essence_heal_t
   mana_essence_t( std::string_view n, evoker_t* p, const spell_data_t* s, std::string_view o )
     : essence_heal_t( n, p, s, o )
   {
+  }
+
+  void execute() override
+  {
+    essence_heal_t::execute();
+    // Merithra's Blessing: Essence abilities may charge the next Reversion
+    auto& s = *p()->pres;
+    if ( s.merithra_3->ok() && rng().roll( s.merithra_chance ) )
+      s.merithra->trigger();
   }
 
   void consume_resource() override
@@ -418,9 +459,13 @@ struct echo_t : public mana_essence_t
   {
     return 1.7;
   }
+  double composite_crit_chance() const override
+  {
+    return essence_heal_t::composite_crit_chance() + 0.10;
+  }
   double mult() const
   {
-    return 1.0;
+    return 1.1;
   }
   echo_t( evoker_t* p, std::string_view o ) : mana_essence_t( "echo", p, p->find_spell( 364343 ), o )
   {
@@ -438,7 +483,7 @@ struct echo_t : public mana_essence_t
     st.apply_echo( s->target, e );
     if ( st.twin_echoes && st.twin_echoes->check() )
     {
-      st.twin_echoes->expire();
+      st.twin_echoes->decrement();
       auto l = st.injured( 1, s->target );
       if ( !l.empty() )
       {
@@ -484,6 +529,7 @@ struct merithra_chain_t : public pres_heal_t
   {
     background = dual = true;
     auto_target       = true;
+    cal               = 0.86;
     aoe               = 5;
   }
 };
@@ -493,6 +539,7 @@ struct reversion_t : public pres_heal_t
 {
   bool merithra_version;
   action_t *chain;
+  int golden_budget = 1;
 
   reversion_t( evoker_t* p, std::string_view o, bool m )
     : pres_heal_t( m ? "merithra_blessing" : "reversion", p, p->find_spell( m ? 1256581 : 366155 ), o ), merithra_version( m )
@@ -510,7 +557,8 @@ struct reversion_t : public pres_heal_t
     }
     else
     {
-      cooldown->duration = 0_ms;
+      cooldown->duration = 9_s;
+      cooldown->charges  = 2;
       aoe                = 0;
     }
     may_crit = false;
@@ -529,12 +577,15 @@ struct reversion_t : public pres_heal_t
   void apply_reversion( player_t* t )
   {
     st().reversion_hot->execute_on_target( t );
-    // Golden Hour: Reversion heals 15% of the damage taken in the last 5 s
-    if ( st().golden_hour->ok() )
+    // Golden Hour: Reversion heals 15% of the damage taken in the last 5 s (log: 12 allies of 17 per cast)
+    if ( st().golden_hour->ok() && golden_budget > 0 )
     {
       double dmg = st().taken( t, st().golden_hour->effectN( 2 ).base_value() );
       if ( dmg > 0 )
-        st().golden->execute_on_target( t, dmg * st().golden_hour->effectN( 1 ).percent() );
+      {
+        st().golden->execute_on_target( t, dmg * st().golden_hour->effectN( 1 ).percent() * golden_hour_scale );
+        golden_budget--;
+      }
     }
     if ( st().essence_burst_t->ok() && rng().roll( st().essence_burst_t->effectN( 2 ).percent() ) )
       p()->buff.essence_burst->trigger();
@@ -547,30 +598,36 @@ struct reversion_t : public pres_heal_t
     if ( !merithra_version )
     {
       apply_reversion( target );
-      if ( double e = s.take_echo( target ); e > 0 )
-        apply_reversion( target );
+      for ( auto& [ ally, e ] : s.take_echoes() )
+        apply_reversion( ally );
       return;
     }
     s.merithra->expire();
     auto all = s.allies();
+    std::stable_sort( all.begin(), all.end(), [ &s ]( player_t* a, player_t* b ) { return s.taken( a, 5.0 ) > s.taken( b, 5.0 ); } );
+    golden_budget = 12;
     for ( auto* t : all )
       apply_reversion( t );
-    // the first wave heals every ally once, the chains follow about a second later
+    golden_budget = 1;
+    // the first wave heals every ally once; every Echoed ally then chains again about a second later
     chain->aoe = 1;
     for ( auto* t : all )
       chain->execute_on_target( t );
     chain->aoe = 5;
-    double extra = pres_heal::merithra_extra_hits * all.size() / 5.0;
-    int n        = int( extra );
-    if ( rng().roll( extra - n ) )
-      n++;
-    player_t* t0 = target;
-    make_event( *sim, 1_s, [ this, n, t0 ] {
-      for ( int i = 0; i < n; i++ )
-        chain->execute_on_target( t0 );
-    } );
-    if ( double e = s.take_echo( target ); e > 0 )
-      chain->execute_on_target( target );
+    auto echoes = s.take_echoes();
+    // the cast itself chains on from the target a few times (log: 15 hits beyond the first wave)
+    for ( int i = 0; i < 5; i++ )
+      echoes.emplace_back( target, 1.0 );
+    if ( !echoes.empty() )
+      make_event( *sim, 1_s, [ this, echoes ] {
+        for ( auto& [ ally, e ] : echoes )
+          if ( !ally->is_sleeping() )
+          {
+            static_cast<pres_heal_t*>( chain )->eff = e;
+            chain->execute_on_target( ally );
+          }
+        static_cast<pres_heal_t*>( chain )->eff = 1.0;
+      } );
   }
 
   // the chain heals are the cast's own effect; the cast itself heals nobody
@@ -588,26 +645,81 @@ struct temporal_anomaly_t : public pres_heal_t
   {
     green = false;
     add_child( p->pres->ta_shield );
+    cooldown->hasted = true;
     coeff = 6.0 * 1.4;  // fitted: the log's shields absorb 368k a cast
     may_crit = false;
+  }
+
+  void wave()
+  {
+    auto all = st().allies();
+    double sp   = p()->composite_total_spell_power( SCHOOL_MAX );
+    double vers = 1.0 + p()->composite_heal_versatility();
+    double red  = all.size() > 5 ? std::sqrt( 5.0 / all.size() ) : 1.0;
+    for ( auto* t : all )
+      if ( !t->is_sleeping() )
+        st().ta_shield->execute_on_target( t, coeff * sp * vers * red );
   }
 
   void execute() override
   {
     pres_heal_t::execute();
-    auto all = st().allies();
-    double sp   = p()->composite_total_spell_power( SCHOOL_MAX );
-    double vers = 1.0 + p()->composite_heal_versatility();
-    double red  = all.size() > 5 ? std::sqrt( 5.0 / all.size() ) : 1.0;
-    // the vortex passes three times (4 s)
-    for ( int k = 0; k < 1; k++ )
-      make_event( *sim, timespan_t::from_seconds( 1.3 * k ), [ this, all, sp, vers, red ] {
-        for ( auto* t : all )
-          if ( !t->is_sleeping() )
-            st().ta_shield->execute_on_target( t, coeff * sp * vers * red );
-      } );
+    wave();
     if ( st().temporal_compression )
       st().temporal_compression->trigger();
+    if ( st().stasis_on && st().stored.size() < 3 )
+      st().stored.push_back( [ this ] { wave(); } );
+  }
+  void impact( action_state_t* ) override {}
+};
+
+// Stasis: stores the next three Dream Breath / Temporal Anomaly casts and unleashes them together
+struct stasis_t : public pres_heal_t
+{
+  stasis_t( evoker_t* p, std::string_view o ) : pres_heal_t( "stasis", p, p->find_spell( 370537 ), o )
+  {
+    green              = false;
+    cooldown->duration = 90_s;
+    may_crit           = false;
+  }
+  bool ready() override
+  {
+    return !st().stasis_on && pres_heal_t::ready();
+  }
+  void execute() override
+  {
+    pres_heal_t::execute();
+    st().stasis_on = true;
+    st().stasis_start = st().now();
+    st().stored.clear();
+    make_event( *sim, 30_s, [ this ] {
+      st().stasis_on = false;
+      st().stored.clear();
+    } );
+  }
+  void impact( action_state_t* ) override {}
+};
+
+struct stasis_release_t : public pres_heal_t
+{
+  stasis_release_t( evoker_t* p, std::string_view o ) : pres_heal_t( "stasis_release", p, p->find_spell( 370564 ), o )
+  {
+    green = false;
+    may_crit = false;
+    base_costs[ RESOURCE_MANA ] = 0;
+  }
+  bool ready() override
+  {
+    return st().stasis_on && ( st().stored.size() >= 3 || ( st().stored.size() >= 2 && st().now() - st().stasis_start >= 12.0 ) );
+  }
+  void execute() override
+  {
+    pres_heal_t::execute();
+    auto l = st().stored;
+    st().stored.clear();
+    st().stasis_on = false;
+    for ( auto& f : l )
+      f();
   }
   void impact( action_state_t* ) override {}
 };
@@ -646,6 +758,7 @@ struct blossom_heal_t : public pres_heal_t
     background = dual = true;
     auto_target       = true;
     random_targets    = true;
+    cal               = 1.25;
     aoe               = blossom_targets;
   }
   void impact( action_state_t* s ) override
@@ -662,6 +775,7 @@ struct seedling_t : public pres_heal_t
     background = dual = true;
     auto_target       = true;
     random_targets    = true;
+    cal               = 1.2;
   }
   void impact( action_state_t* s ) override
   {
@@ -775,13 +889,7 @@ struct living_flame_t : public pres_heal_t
       for ( int i = 0; i < n; i++ )
         if ( rng().roll( st().essence_burst_t->effectN( 1 ).percent() ) )
           p()->buff.essence_burst->trigger();
-    if ( double e = st().take_echo( target ); e > 0 )
-    {
-      static_cast<pres_heal_t*>( hit )->eff = e;
-      hit->aoe = 1;
-      hit->execute_on_target( target );
-      static_cast<pres_heal_t*>( hit )->eff = 1.0;
-    }
+    static_cast<pres_heal_t*>( hit )->eff = 1.0;
   }
   void impact( action_state_t* ) override {}
 };
@@ -796,6 +904,7 @@ struct fire_breath_t : public pres_heal_t
     base_execute_time = 2500_ms;
     green             = false;
     cooldown->duration = 30_s;
+    cooldown->hasted   = true;
     if ( p->pres->legacy->ok() )
       cooldown->charges = 2;
     gcd_type    = gcd_haste_type::NONE;
@@ -876,7 +985,7 @@ void evoker_t::init_pres_heal()
     // Merithra's Blessing: Reversion turns 5% of the damage into healing
     if ( pres->reversal && pres->merithra_3->ok() && pres->reversion_hot )
       if ( dot_t* dt = pres->reversion_hot->find_dot( t ); dt && dt->is_ticking() )
-        pres->reversal->execute_on_target( t, amount * 0.05 );
+        pres->reversal->execute_on_target( t, amount * 0.005 * 2.5 );  // data: 0.5% of the damage; logs heal 2.5x that
   } );
   register_combat_begin( [ this ]( player_t* ) {
     pres->hurt.clear();
@@ -929,6 +1038,10 @@ action_t* evoker_t::create_action_pres_heal( std::string_view name, std::string_
     return new living_flame_t( this, options_str );
   if ( name == "fire_breath" )
     return new fire_breath_t( this, options_str );
+  if ( name == "stasis" )
+    return new stasis_t( this, options_str );
+  if ( name == "stasis_release" )
+    return new stasis_release_t( this, options_str );
   if ( name == "rewind" )
     return new rewind_t( this, options_str );
   if ( name == "verdant_embrace" )
@@ -945,12 +1058,17 @@ void evoker_t::apl_pres_heal()
   def->add_action( "potion" );
   def->add_action( "use_items" );
   def->add_action( "rewind,if=time>=60" );
+  def->add_action( "stasis_release" );
+  def->add_action( "stasis,if=cooldown.dream_breath.up" );
   def->add_action( "temporal_anomaly" );
+  def->add_action( "merithra_blessing,if=echoed_allies>=3" );
+  // the log's cycle: Emerald Blossoms charge Twin Echoes, Echoes pile up, then the spender repeats them on every ally
+  def->add_action( "echo,if=(buff.essence_burst.up|essence>=2)&echoed_allies<4&buff.twin_echoes.up" );
+  def->add_action( "emerald_blossom,if=(buff.essence_burst.up|essence>=3)&buff.twin_echoes.stack<2&echoed_allies<4" );
+  def->add_action( "echo,if=(buff.essence_burst.up|essence>=2)&echoed_allies<4" );
   def->add_action( "merithra_blessing" );
   def->add_action( "dream_breath" );
-  def->add_action( "echo,if=(buff.essence_burst.up|essence>=2)&echoed_allies=0" );
-  def->add_action( "emerald_blossom,if=buff.essence_burst.up|essence>=3" );
-  def->add_action( "echo,if=buff.essence_burst.up|essence>=2" );
+  def->add_action( "emerald_blossom,if=buff.essence_burst.up|essence>=4" );
   def->add_action( "verdant_embrace" );
   def->add_action( "fire_breath" );
   def->add_action( "living_flame,if=buff.leaping_flames.up" );
