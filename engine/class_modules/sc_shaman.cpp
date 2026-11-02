@@ -10,6 +10,7 @@
 #include "action/attack.hpp"
 #include "action/dot.hpp"
 #include "action/heal.hpp"
+#include "action/absorb.hpp"  // wowhub
 #include "action/residual_action.hpp"
 #include "action/spell.hpp"
 #include "class_modules/apl/apl_shaman.hpp"
@@ -2167,6 +2168,13 @@ public:
     return RESOURCE_MANA;
   }
   role_e primary_role() const override;
+  // wowhub healing sims (sc_shaman_resto_heal.inc)
+  struct resto_heal_state_t* rh = nullptr;
+  bool resto_heal_mode() const;
+  void init_resto_heal();
+  void create_resto_heal_actions();
+  action_t* create_action_resto_heal( util::string_view name, util::string_view options );
+  void apl_resto_heal();
   stat_e convert_hybrid_stat( stat_e s ) const override;
   void reset() override;
   void merge( player_t& other ) override;
@@ -10333,10 +10341,16 @@ void shaman_t::trigger_secondary_ability( const action_state_t* source_state, ac
   secondary_action->schedule_execute( secondary_state );
 }
 
+#include "sc_shaman_resto_heal.inc"  // wowhub
+
 // shaman_t::create_action  =================================================
 
 action_t* shaman_t::create_action( util::string_view name, util::string_view options_str )
 {
+  if ( resto_heal_mode() )  // wowhub
+    if ( action_t* a = create_action_resto_heal( name, options_str ) )
+      return a;
+
   // shared
   if ( name == "ascendance" )
     return new ascendance_t( this, "ascendance", options_str );
@@ -10606,6 +10620,13 @@ std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
 void shaman_t::create_actions()
 {
   parse_player_effects_t::create_actions();
+
+  if ( resto_heal_mode() )  // wowhub
+  {
+    init_resto_heal();
+    create_resto_heal_actions();
+    return;
+  }
 
   windfury_mh = new windfury_attack_t( "windfury_attack", this, find_spell( 25504 ), &( main_hand_weapon ) );
   flametongue = new flametongue_weapon_spell_t( "flametongue_attack", this,
@@ -13136,6 +13157,9 @@ void shaman_t::init_finished()
 
 bool shaman_t::validate_actor()
 {
+  if ( resto_heal_mode() )  // wowhub
+    return true;
+
   if ( !( primary_role() == ROLE_ATTACK && specialization() == SHAMAN_ENHANCEMENT ) &&
        !( primary_role() == ROLE_SPELL && specialization() == SHAMAN_ELEMENTAL ) &&
        !( primary_role() == ROLE_SPELL && specialization() == SHAMAN_RESTORATION ) )
@@ -13608,7 +13632,10 @@ void shaman_t::init_action_list()
       is_ptr() ? shaman_apl::elemental_ptr( this ) : shaman_apl::elemental( this );
       break;
     case SHAMAN_RESTORATION:
-      init_action_list_restoration_dps();
+      if ( resto_heal_mode() )  // wowhub
+        apl_resto_heal();
+      else
+        init_action_list_restoration_dps();
       break;
     default:
       break;
@@ -13934,7 +13961,7 @@ void shaman_t::merge( player_t& other )
 role_e shaman_t::primary_role() const
 {
   if ( parse_player_effects_t::primary_role() == ROLE_HEAL )
-    return ROLE_HYBRID;  // To prevent spawning healing_target, as there is no support for healing.
+    return specialization() == SHAMAN_RESTORATION ? ROLE_HEAL : ROLE_HYBRID;  // wowhub: Restoration heals in healing sims  // To prevent spawning healing_target, as there is no support for healing.
 
   if ( specialization() == SHAMAN_RESTORATION )
   {
