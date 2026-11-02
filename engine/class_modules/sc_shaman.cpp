@@ -10481,6 +10481,39 @@ void shaman_t::create_pets()
 
 std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
 {
+  if ( resto_heal_mode() )  // wowhub: raid health for the healing priority
+  {
+    auto count_below = [ this ]( double pct ) {
+      return [ this, pct ]() {
+        int n = 0;
+        for ( auto* t : sim->healing_no_pet_list )
+          if ( !t->is_sleeping() && t->resources.pct( RESOURCE_HEALTH ) < pct )
+            n++;
+        return as<double>( n );
+      };
+    };
+    if ( util::str_compare_ci( name, "injured_95" ) )
+      return make_fn_expr( name, count_below( 0.95 ) );
+    if ( util::str_compare_ci( name, "injured_90" ) )
+      return make_fn_expr( name, count_below( 0.90 ) );
+    if ( util::str_compare_ci( name, "injured_80" ) )
+      return make_fn_expr( name, count_below( 0.80 ) );
+    if ( util::str_compare_ci( name, "injured_60" ) )
+      return make_fn_expr( name, count_below( 0.60 ) );
+    if ( util::str_compare_ci( name, "raid_deficit" ) )  // average missing health of the group, in percent
+      return make_fn_expr( name, [ this ]() {
+        double sum = 0;
+        int n      = 0;
+        for ( auto* t : sim->healing_no_pet_list )
+          if ( !t->is_sleeping() )
+          {
+            sum += 1.0 - t->resources.pct( RESOURCE_HEALTH );
+            n++;
+          }
+        return n ? 100.0 * sum / n : 0.0;
+      } );
+  }
+
   if ( util::str_compare_ci( name, "rolling_thunder.next_tick" ) )
   {
     return make_fn_expr( name, [ this ]() {

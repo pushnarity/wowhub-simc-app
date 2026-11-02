@@ -593,7 +593,7 @@ inline void rh_heal_t::roll_tier2( const action_state_t* s )
 }
 
 // Healing Stream Totem and its Stormstream upgrade
-constexpr double hst_calibration = 0.70;  // logs: Healing Stream hits are ~0.6x what the tooltip data gives (unexplained)
+constexpr double hst_calibration = 0.85;  // logs: Healing Stream hits are ~0.6x what the tooltip data gives (unexplained)
 
 struct hst_pulse_t : public rh_heal_t
 {
@@ -911,6 +911,6 @@ void shaman_t::apl_resto_heal()
   def->add_action( "natures_swiftness,if=group_size>=10" );
   def->add_action( "healing_wave,if=buff.natures_swiftness.up" );
   def->add_action( "riptide" );
-  def->add_action( "chain_heal,if=mana.pct>=10+80*fight_remains%(time+fight_remains)" );
-  def->add_action( "chain_heal,if=buff.ascendance_rh.up" );
+  def->add_action( "chain_heal,if=injured_90>=1+group_size%7&mana.pct>=10+80*fight_remains%(time+fight_remains)" );
+  def->add_action( "chain_heal,if=buff.ascendance_rh.up&injured_95>=1" );
 }
