@@ -48,7 +48,7 @@ jobs:
           ITER: "10"
           SKIP_SPEED: "1"
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1:suppressions=${{ github.workspace }}/wowhub/ci/ubsan.supp
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: wowhub/ci/run.sh build/simc
 
   warnings:

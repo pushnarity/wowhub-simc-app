@@ -1,3 +1,0 @@
-# Known SimulationCraft issues the memory-safety check skips (not ours; everything else still stops the run).
-# dbc_t::combat_rating reads the rating table at level 93 (a boss) though it holds 90 levels: every sim, theirs too.
-bounds:engine/dbc/sc_const_data.cpp

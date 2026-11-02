@@ -1672,6 +1672,10 @@ void enemy_t::init_base_stats()
     true_level = sim->max_player_level + sim->rel_target_level;
   else
     true_level = sim->max_player_level + 3;
+  // wowhub: healing targets are raid members, so their ratings must come from a player level (the rating
+  // table stops at MAX_SCALING_LEVEL; a boss level read past its end)
+  if ( type == HEALING_ENEMY )
+    true_level = std::min( sim->max_player_level, true_level );
 
   // waiting_time override
   waiting_time = 5_s;
