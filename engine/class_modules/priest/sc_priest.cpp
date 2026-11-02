@@ -4352,7 +4352,8 @@ void priest_t::create_options()
   add_option( opt_bool( "priest.mindgames_damage_reversal", options.mindgames_damage_reversal ) );
   add_option( opt_bool( "priest.self_power_infusion", options.self_power_infusion ) );
   // Default is 2, minimum of 1 bounce per second, maximum of 1 bounce per 12 seconds (prayer of mending's cooldown)
-  add_option( opt_int( "priest.holy_heal_pool", options.holy_heal_pool, 1, 20 ) );
+  add_option( opt_int( "priest.holy_heal_pool", options.holy_heal_pool, 1, 30 ) );
+  add_option( opt_int( "priest.holy_serenity_pool", options.holy_serenity_pool, 1, 30 ) );
   add_option( opt_float( "priest.prayer_of_mending_bounce_rate", options.prayer_of_mending_bounce_rate, 1, 12 ) );
   add_option( opt_bool( "priest.init_insanity", options.init_insanity ) );
   add_option( opt_float( "priest.twist_of_fate_heal_rppm", options.twist_of_fate_heal_rppm, 0, 120 ) );

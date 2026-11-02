@@ -906,6 +906,7 @@ public:
 
     // Time in seconds between prayer of mending bounces
     double prayer_of_mending_bounce_rate = 2;
+    int holy_serenity_pool = 20;  // wowhub: same for Holy Word: Serenity
     int holy_heal_pool = 20;  // wowhub: Holy single-target heals pick among the N most injured
 
     // Option whether or not to start with higher than 0 Insanity based on talents
@@ -1490,7 +1491,7 @@ struct priest_heal_t : public priest_action_t<heal_t>
     {
       std::vector<player_t*> v;
       for ( auto* t : sim->healing_no_pet_list )
-        if ( !t->is_sleeping() && target_ready( t ) )
+        if ( !t->is_sleeping() && target_ready( t ) && t->resources.pct( RESOURCE_HEALTH ) < 0.995 )
           v.push_back( t );
       size_t n = std::min<size_t>( as<size_t>( target_pool ), v.size() );
       if ( n > 0 )

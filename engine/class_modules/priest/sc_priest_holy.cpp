@@ -21,6 +21,7 @@ struct echo_of_light_t final : public residual_action::residual_periodic_action_
     harmful      = false;
     background   = true;
     holy_mastery = false;
+    tick_may_crit = false;  // wowhub: Echo of Light never crits in logs
   }
 };
 struct holy_word_sanctify_t final : public priest_heal_t
@@ -69,7 +70,7 @@ struct holy_word_serenity_t final : public priest_heal_t
     parse_options( options_str );
     harmful      = false;
     holy_mastery = true;
-    target_pool  = p.options.holy_heal_pool;
+    target_pool  = p.options.holy_serenity_pool;
   }
 
   double cost() const override
