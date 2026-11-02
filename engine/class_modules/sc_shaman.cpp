@@ -13313,7 +13313,8 @@ std::string shaman_t::default_potion() const
                                    ( true_level >= 45 ) ? "potion_of_unbridled_fury" :
                                    "disabled";
 
-  std::string restoration_potion = ( true_level >= 61 ) ? "elemental_potion_of_ultimate_power_3" :
+  std::string restoration_potion = ( true_level >= 81 ) ? "lights_potential_2" :  // wowhub: current consumables
+                                   ( true_level >= 61 ) ? "elemental_potion_of_ultimate_power_3" :
                                    ( true_level >= 51 ) ? "potion_of_spectral_intellect" :
                                    ( true_level >= 45 ) ? "potion_of_unbridled_fury" :
                                    "disabled";
@@ -13341,7 +13342,8 @@ std::string shaman_t::default_flask() const
                                   ( true_level >= 45 ) ? "greater_flask_of_the_currents" :
                                   "disabled";
 
-  std::string restoration_flask = ( true_level >= 61 ) ? "phial_of_static_empowerment_3" :
+  std::string restoration_flask = ( true_level >= 81 ) ? "flask_of_the_magisters_2" :  // wowhub
+                                  ( true_level >= 61 ) ? "phial_of_static_empowerment_3" :
                                   ( true_level >= 51 ) ? "spectral_flask_of_power" :
                                   ( true_level >= 45 ) ? "greater_flask_of_endless_fathoms" :
                                   "disabled";
@@ -13369,7 +13371,8 @@ std::string shaman_t::default_food() const
                                  ( true_level >= 45 ) ? "baked_port_tato" :
                                  "disabled";
 
-  std::string restoration_food = ( true_level >= 61 ) ? "fated_fortune_cookie" :
+  std::string restoration_food = ( true_level >= 81 ) ? "silvermoon_parade" :  // wowhub
+                                 ( true_level >= 61 ) ? "fated_fortune_cookie" :
                                  ( true_level >= 51 ) ? "feast_of_gluttonous_hedonism" :
                                  ( true_level >= 45 ) ? "baked_port_tato" :
                                  "disabled";
@@ -13404,6 +13407,8 @@ std::string shaman_t::default_temporary_enchant() const
     case SHAMAN_ENHANCEMENT:
       return "disabled";
     case SHAMAN_RESTORATION:
+      if ( true_level >= 81 )  // wowhub
+        return "main_hand:thalassian_phoenix_oil_2";
       if ( true_level >= 60 )
         return "main_hand:shadowcore_oil";
       SC_FALLTHROUGH;

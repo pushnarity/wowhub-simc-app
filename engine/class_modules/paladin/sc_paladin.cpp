@@ -3825,7 +3825,7 @@ std::string paladin_t::default_potion() const
 
   std::string holy_dps_pot = ( true_level > 50 ) ? "spectral_intellect" : "disabled";
 
-  std::string holy_pot = ( true_level > 50 ) ? "spectral_intellect" : "disabled";
+  std::string holy_pot = ( true_level > 80 ) ? "lights_potential_2" : ( true_level > 50 ) ? "spectral_intellect" : "disabled";  // wowhub: current consumables
 
   switch ( specialization() )
   {
@@ -3848,7 +3848,7 @@ std::string paladin_t::default_food() const
 
   std::string holy_dps_food = ( true_level > 50 ) ? "feast_of_gluttonous_hedonism" : "disabled";
 
-  std::string holy_food = ( true_level > 50 ) ? "feast_of_gluttonous_hedonism" : "disabled";
+  std::string holy_food = ( true_level > 80 ) ? "silvermoon_parade" : ( true_level > 50 ) ? "feast_of_gluttonous_hedonism" : "disabled";  // wowhub
 
   switch ( specialization() )
   {
@@ -3871,7 +3871,7 @@ std::string paladin_t::default_flask() const
 
   std::string holy_dps_flask = ( true_level > 50 ) ? "spectral_flask_of_power" : "disabled";
 
-  std::string holy_flask = ( true_level > 50 ) ? "spectral_flask_of_power" : "disabled";
+  std::string holy_flask = ( true_level > 80 ) ? "flask_of_the_magisters_2" : ( true_level > 50 ) ? "spectral_flask_of_power" : "disabled";  // wowhub
 
   switch ( specialization() )
   {
@@ -3903,7 +3903,7 @@ std::string paladin_t::default_temporary_enchant() const
       return true_level < 81 ? "disabled" : "main_hand:thalassian_phoenix_oil_2";
 
     default:
-      return "main_hand:howling_rune_3";
+      return true_level > 80 ? "main_hand:thalassian_phoenix_oil_2" : "main_hand:howling_rune_3";  // wowhub
   }
 }
 
