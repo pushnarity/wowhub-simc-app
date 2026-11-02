@@ -1821,7 +1821,9 @@ struct evoker_t : public player_t
   void init_action_list() override;
   // wowhub: Preservation healing for healing sims (sc_evoker_preservation_heal.inc)
   pres_state_t* pres = nullptr;
+  std::string pres_tune;  // wowhub: name=value/name=value fits for the Preservation healing model
   bool pres_heal_mode() const;
+  double pres_flow_haste() const;
   void init_pres_heal();
   void create_pres_heal_actions();
   action_t* create_action_pres_heal( std::string_view name, std::string_view options_str );
@@ -10895,6 +10897,7 @@ void evoker_t::create_options()
   add_option( opt_bool( "evoker.use_early_chaining", option.use_early_chaining ) );
   add_option( opt_float( "evoker.scarlet_overheal", option.scarlet_overheal, 0.0, 1.0 ) );
   add_option( opt_float( "evoker.heal_eb_chance", option.heal_eb_chance, 0.0, 1.0 ) );
+  add_option( opt_string( "pres_tune", pres_tune ) );  // wowhub
   add_option( opt_timespan( "evoker.prepull_deep_breath_delay", option.prepull_deep_breath_delay, 0_s, 3_s ) );
   add_option(
       opt_timespan( "evoker.prepull_deep_breath_delay_stddev", option.prepull_deep_breath_delay_stddev, 0_s, 1.5_s ) );
@@ -11147,6 +11150,18 @@ std::unique_ptr<expr_t> evoker_t::create_expression( std::string_view expr_str )
   if ( util::str_compare_ci( expr_str, "essense" ) || util::str_compare_ci( expr_str, "essences" ) )
     return make_ref_expr( expr_str, resources.current[ RESOURCE_ESSENCE ] );
 
+  if ( expr_str.size() > 8 && expr_str.substr( 0, 8 ) == "injured_" )  // wowhub: allies below N% health
+  {
+    double lim = util::to_double( expr_str.substr( 8 ) ) / 100.0;
+    return make_fn_expr( expr_str, [ this, lim ] {
+      int n = 0;
+      for ( auto* t : sim->healing_no_pet_list )
+        if ( !t->is_sleeping() && t->resources.pct( RESOURCE_HEALTH ) < lim )
+          n++;
+      return n;
+    } );
+  }
+
   if ( util::str_compare_ci( expr_str, "echoed_allies" ) )  // wowhub: allies carrying my Echo
     return make_fn_expr( expr_str, [ this ] {
       int n = 0;
@@ -11281,6 +11296,8 @@ double evoker_t::composite_spell_haste() const
 
   if ( buff.fury_of_the_aspects )
     h *= 1.0 / ( 1.0 + buff.fury_of_the_aspects->check_value() );
+
+  h *= pres_flow_haste();  // wowhub
 
   return h;
 }

@@ -40,10 +40,52 @@ struct pres_state_t
   action_t *seedling = nullptr, *panacea_heal = nullptr, *ta_shield = nullptr;
 
   action_t* echo_twin = nullptr;
+
+  // Mythic+ build (Lifebind, Life-Giver's Flame, Lifespark, Flow State, Dream Simulacrum): see the key replays
+  std::map<std::string, double> tune;  // pres_tune=name=value/... fits, for trying numbers without a rebuild
+  double T( const char* n, double d ) const
+  {
+    auto it = tune.find( n );
+    return it == tune.end() ? d : it->second;
+  }
+  bool k_lifebind = false, k_lgf = false, k_dsim = false, k_lifespark = false, k_flow = false, k_energy = false,
+       k_mplus = false;
+  buff_t *lifebind = nullptr, *lifespark = nullptr, *flow = nullptr;
+  player_t* lb_partner = nullptr;
+  action_t *lifebind_heal = nullptr, *lgf_heal = nullptr, *av_heal = nullptr, *instincts = nullptr;
+  gain_t* energy_gain = nullptr;
+  player_t* av_target = nullptr;  // Preternatural Antivenom: the ally infused now
+  timespan_t av_until = timespan_t::min();
+  double av_left = 0.0;
+
+  // a fitted number: the raid-log value, or the Mythic+-log value when this is the Mythic+ build
+  double C( const char* n, double raid, double mplus ) const
+  {
+    return T( n, k_mplus ? mplus : raid );
+  }
+
+  // Lifebind: healing on either partner heals the other for 60% of the raw amount
+  void lifebind_transfer( player_t* t, double raw )
+  {
+    if ( !lifebind || !lifebind->check() || !lifebind_heal || raw <= 0 )
+      return;
+    player_t* other = t == p ? lb_partner : ( t == lb_partner ? p : nullptr );
+    if ( !other || other->is_sleeping() )
+      return;
+    lifebind_heal->execute_on_target( other, lifebind->data().effectN( 1 ).percent() * T( "lifebind", 1.9 ) * raw );
+  }
+
+  // Merithra's Blessing: Essence abilities may charge the next Reversion (Mythic+: Emerald Blossom and Disintegrate roll too)
+  void roll_merithra()
+  {
+    if ( k_mplus && merithra_3->ok() && p->rng().roll( merithra_chance ) )
+      merithra->trigger();
+  }
+
   double stasis_start = 0;
   bool stasis_on = false;  // Stasis stores the next three Dream Breath / Temporal Anomaly casts
   std::vector<std::function<void()>> stored;
-  double merithra_chance = 0.10;  // data 20%; logs show 7-20% of Essence casts end in a Merithra's Blessing
+  double merithra_chance = 0.10;  // pres_tune=merithra=<x> overrides  // data 20%; logs show 7-20% of Essence casts end in a Merithra's Blessing
 
   explicit pres_state_t( evoker_t* pl ) : p( pl ) {}
 
@@ -148,10 +190,17 @@ struct flat_heal_t : public heal_t
     auto_target = false;
     target      = p;
   }
+  bool transfers = true;  // heals Lifebind passes on (the Lifebind heal itself does not)
   void init() override
   {
     heal_t::init();
     snapshot_flags = update_flags = 0;
+  }
+  void assess_damage( result_amount_type t, action_state_t* s ) override
+  {
+    heal_t::assess_damage( t, s );
+    if ( transfers )
+      static_cast<evoker_t*>( player )->pres->lifebind_transfer( s->target, s->result_total );
   }
 };
 
@@ -241,6 +290,12 @@ struct pres_heal_t : public heals::evoker_heal_t
     return eff * cal;  // talent and tier modifiers come with the spell data ("Affected By" in the report)
   }
 
+  void assess_damage( result_amount_type t, action_state_t* s ) override
+  {
+    evoker_heal_t::assess_damage( t, s );
+    st().lifebind_transfer( s->target, s->result_total );
+  }
+
   double composite_da_multiplier( const action_state_t* s ) const override
   {
     return evoker_heal_t::composite_da_multiplier( s ) * mult();
@@ -279,9 +334,11 @@ struct twin_flame_heal_t : public pres_heal_t
 
   void execute() override
   {
-    pres_heal_t::execute();
+    // Mythic+ logs: about 0.45 Twin Flames per Essence Burst spent (209 for ~470); the raid logs fit 1.0
+    if ( !st().k_mplus || rng().roll( st().T( "tf", 0.45 ) ) )
+      pres_heal_t::execute();
     // 12.1 Preservation tier 2-piece: consuming Essence Burst sends a Living Flame as well
-    if ( st().lf_set && rng().roll( 0.6 ) )  // logs: 38-56 tier Living Flames for 73-76 Essence Burst consumptions
+    if ( st().lf_set && rng().roll( st().C( "lf_tier", 0.6, 0.1 ) ) )  // logs: 38-56 tier Living Flames for 73-76 Essence Burst consumptions
       st().lf_set->execute_on_target( target );
   }
 };
@@ -295,7 +352,7 @@ struct living_flame_hit_t : public pres_heal_t
     auto_target       = true;
     green             = false;
     dot_duration      = base_tick_time = 0_ms;  // Ruby Embers is a Devastation talent
-    cal               = 1.0;
+    cal               = p->pres->C( "lf_cal", 1.0, 0.7 );
   }
   int n_targets() const override
   {
@@ -328,7 +385,7 @@ inline void consume_dream_breath( evoker_t* p, player_t* t )
       continue;
     timespan_t tt = a->tick_time( d->state );
     double tick   = a->calculate_tick_amount( d->state, d->current_stack() );
-    double amount = tick * ( consumed_time / tt.total_seconds() ) * pct * consume_flame_scale;
+    double amount = tick * ( consumed_time / tt.total_seconds() ) * pct * s.C( "cf_scale", consume_flame_scale, 1.3 );
     d->adjust_duration( -timespan_t::from_seconds( consumed_time ) );
     s.consume->execute_on_target( t, amount );
   }
@@ -341,7 +398,7 @@ struct dream_breath_hot_t : public pres_heal_t
     background = true;
     eff        = e;
     auto_target = true;
-    cal            = 1.22;
+    cal            = p->pres->C( "db_cal", 1.22, 0.6 );
     random_targets = true;  // the cone catches whoever stands in it
     aoe        = dream_breath_targets;
     dot_duration   = 14_s + timespan_t::from_seconds( p->pres->deep_exhalation->ok() ? p->pres->deep_exhalation->effectN( 2 ).base_value() / 1000.0 : 0.0 );
@@ -372,7 +429,7 @@ struct dream_breath_t : public pres_heal_t
     add_child( echo_hot );
     if ( p->pres->legacy->ok() )
       cooldown->charges = 2;
-    cooldown->duration = 30_s;
+    cooldown->duration = timespan_t::from_seconds( 30.0 * p->pres->T( "db_cd", p->pres->k_mplus ? 1.15 : 1.0 ) );
     cooldown->hasted   = true;  // logs: a Dream Breath charge comes back about every 23 s at 30% haste
     gcd_type = gcd_haste_type::NONE;
     trigger_gcd = 500_ms;
@@ -405,6 +462,8 @@ struct dream_breath_t : public pres_heal_t
       p()->buff.essence_burst->trigger();
     if ( st().temporal_compression )
       st().temporal_compression->expire();
+    if ( st().flow )
+      st().flow->trigger();
   }
 };
 
@@ -523,6 +582,13 @@ struct reversion_hot_t : public pres_heal_t
     tick_zero      = false;
     may_crit       = true;
   }
+  void tick( dot_t* d ) override
+  {
+    pres_heal_t::tick( d );
+    auto& s = st();
+    if ( s.lifespark && rng().roll( s.T( "ls_chance", 0.03 ) ) )
+      s.lifespark->trigger();
+  }
 };
 
 struct merithra_chain_t : public pres_heal_t
@@ -531,7 +597,7 @@ struct merithra_chain_t : public pres_heal_t
   {
     background = dual = true;
     auto_target       = true;
-    cal               = 0.86;
+    cal               = p->pres->C( "mb_cal", 0.86, 0.36 );
     aoe               = 5;
   }
 };
@@ -772,7 +838,7 @@ struct blossom_heal_t : public pres_heal_t
     background = dual = true;
     auto_target       = true;
     random_targets    = true;
-    cal               = 1.25;
+    cal               = p->pres->C( "eb_cal", 1.25, 0.9 );
     aoe               = blossom_targets;
   }
   void impact( action_state_t* s ) override
@@ -789,7 +855,7 @@ struct seedling_t : public pres_heal_t
     background = dual = true;
     auto_target       = true;
     random_targets    = true;
-    cal               = 1.2;
+    cal               = p->pres->C( "sd_cal", 1.2, 0.9 );
   }
   void impact( action_state_t* s ) override
   {
@@ -821,6 +887,7 @@ struct emerald_blossom_t : public mana_essence_t
   {
     essence_heal_t::execute();
     auto& s = *p()->pres;
+    s.roll_merithra();
     if ( s.twin_echoes_t->ok() )
       s.twin_echoes->trigger();
     if ( p()->talent.ancient_flame.ok() )
@@ -847,8 +914,11 @@ struct verdant_embrace_t : public heals::verdant_embrace_t
 {
   verdant_embrace_t( evoker_t* p, std::string_view o ) : heals::verdant_embrace_t( p, o )
   {
-    cooldown->duration = 28_s;
+    auto& s            = *p->pres;
+    cooldown->duration = timespan_t::from_seconds( s.T( "ve_cd", 28.0 ) );
     auto_target        = false;  // the embrace flies to anyone, not to the most injured
+    if ( s.k_dsim )  // Dream Simulacrum: +40% healing, no leap
+      impact_action->base_multiplier *= ( 1.0 + s.T( "dsim", 0.40 ) ) * s.T( "ve_cal", 1.0 );
   }
   void schedule_execute( action_state_t* state = nullptr ) override
   {
@@ -863,9 +933,15 @@ struct verdant_embrace_t : public heals::verdant_embrace_t
   void execute() override
   {
     heals::verdant_embrace_t::execute();
-    if ( p()->pres->tier_4pc )  // 4-piece: Verdant Embrace grants Essence Burst
+    auto& s = *p()->pres;
+    if ( s.tier_4pc )  // 4-piece: Verdant Embrace grants Essence Burst
       p()->buff.essence_burst->trigger();
     consume_dream_breath( p(), target );
+    if ( s.lifebind )  // Lifebind bonds the healer and the embraced ally for 8 s
+    {
+      s.lb_partner = target == p() ? nullptr : target;
+      s.lifebind->trigger();
+    }
   }
 };
 
@@ -885,6 +961,8 @@ struct living_flame_t : public pres_heal_t
   timespan_t execute_time() const override
   {
     timespan_t t = pres_heal_t::execute_time();
+    if ( st().lifespark && st().lifespark->check() )
+      return 0_ms;
     if ( p()->buff.ancient_flame->check() )
       t *= 0.7;
     return t;
@@ -895,6 +973,11 @@ struct living_flame_t : public pres_heal_t
     pres_heal_t::execute();
     int extra = p()->buff.leaping_flames->check();
     hit->aoe  = 1 + extra;
+    if ( st().lifespark && st().lifespark->check() )  // Lifespark: instant and +100% healing
+    {
+      static_cast<pres_heal_t*>( hit )->eff = 1.0 + st().T( "ls_heal", 1.0 );
+      st().lifespark->decrement();
+    }
     hit->execute_on_target( target );
     int n = hit->num_targets_hit;
     p()->buff.leaping_flames->expire();
@@ -908,6 +991,35 @@ struct living_flame_t : public pres_heal_t
   void impact( action_state_t* ) override {}
 };
 
+// Disintegrate: a Preservation player in a key spends spare Essence on it; it heals nobody but its Energy Loop
+// returns mana (logs: 246 casts in 1676 s, the channel is up 20% of the time, 1.9M mana back).
+struct disintegrate_pres_t : public essence_heal_t
+{
+  disintegrate_pres_t( evoker_t* p, std::string_view o )
+    : essence_heal_t( "disintegrate", p, p->find_class_spell( "Disintegrate" ), o )
+  {
+    harmful = false;
+    channeled = false;
+    dot_duration = base_tick_time = 0_ms;
+    may_crit = false;
+    spell_power_mod.direct = 0;
+    base_execute_time = timespan_t::from_seconds( p->pres->T( "dis_time", 1.5 ) );
+  }
+  void execute() override
+  {
+    essence_heal_t::execute();
+    auto& s = st();
+    s.roll_merithra();
+    if ( s.k_energy && s.energy_gain )
+      p()->resource_gain( RESOURCE_MANA, s.T( "dis_mana", 7800.0 ), s.energy_gain );
+  }
+  pres_state_t& st() const
+  {
+    return *p()->pres;
+  }
+  void impact( action_state_t* ) override {}
+};
+
 // Fire Breath: for Preservation it only feeds Living Flame (Leaping Flames) and Essence Burst.
 struct fire_breath_t : public pres_heal_t
 {
@@ -917,7 +1029,7 @@ struct fire_breath_t : public pres_heal_t
     dot_duration = base_tick_time = 0_ms;
     base_execute_time = 2500_ms;
     green             = false;
-    cooldown->duration = 30_s;
+    cooldown->duration = timespan_t::from_seconds( 30.0 * p->pres->T( "fb_cd", p->pres->k_mplus ? 1.2 : 1.0 ) );
     cooldown->hasted   = true;
     if ( p->pres->legacy->ok() )
       cooldown->charges = 2;
@@ -932,9 +1044,31 @@ struct fire_breath_t : public pres_heal_t
       t *= 1.0 - std::min( 0.5, 0.10 * st().temporal_compression->check() );
     return t;
   }
+  // Life-Giver's Flame: the breath's damage heals the injured, split evenly (logs: 4-5 pulses a cast, ~130k raw each)
+  void life_givers_flame()
+  {
+    auto& s = st();
+    if ( !s.k_lgf || !s.lgf_heal )
+      return;
+    int pulses = static_cast<int>( s.T( "lgf_pulses", 4.0 ) );
+    for ( int i = 0; i < pulses; i++ )
+      make_event( *sim, timespan_t::from_seconds( 0.5 + 1.33 * i ), [ this ] {
+        auto& st2 = st();
+        auto l    = st2.injured( 5 );
+        if ( l.empty() )
+          return;
+        double total = st2.T( "lgf", 52.0 ) * p()->composite_total_spell_power( SCHOOL_MAX );
+        for ( auto* t : l )
+          st2.lgf_heal->execute_on_target( t, total / l.size() );
+      } );
+  }
+
   void execute() override
   {
     pres_heal_t::execute();
+    life_givers_flame();
+    if ( st().flow )
+      st().flow->trigger();
     if ( p()->talent.leaping_flames.ok() )
       p()->buff.leaping_flames->trigger( 3 );
     if ( st().ashes->ok() )
@@ -951,6 +1085,13 @@ struct fire_breath_t : public pres_heal_t
 // ==========================================================================
 // Hooks
 // ==========================================================================
+double evoker_t::pres_flow_haste() const
+{
+  if ( pres && pres->flow && pres->flow->check() )
+    return 1.0 / ( 1.0 + pres->flow->default_value * pres->T( "flow", 1.0 ) );
+  return 1.0;
+}
+
 bool evoker_t::pres_heal_mode() const
 {
   return specialization() == EVOKER_PRESERVATION && primary_role() == ROLE_HEAL && sim->heal_target;
@@ -985,6 +1126,30 @@ void evoker_t::init_pres_heal()
   s.ashes           = HT( "Ashes in Motion" );
   s.tier_2pc        = sets->has_set_bonus( EVOKER_PRESERVATION, MID2, B2 );
   s.tier_4pc        = sets->has_set_bonus( EVOKER_PRESERVATION, MID2, B4 );
+
+  for ( auto& kv : util::string_split<std::string_view>( pres_tune, "/" ) )
+  {
+    auto pr = util::string_split<std::string_view>( kv, "=" );
+    if ( pr.size() == 2 )
+      s.tune[ std::string( pr[ 0 ] ) ] = util::to_double( pr[ 1 ] );
+  }
+  s.k_lifebind  = ST( "Lifebind" )->ok();
+  s.k_lgf       = ST( "Life-Giver's Flame" )->ok();
+  s.k_dsim      = ST( "Dream Simulacrum" )->ok();
+  s.k_lifespark = ST( "Lifespark" )->ok();
+  s.k_flow      = ST( "Flow State" )->ok();
+  s.k_energy    = ST( "Energy Loop" )->ok();
+  s.k_mplus     = s.k_lifebind && !s.twin_echoes_t->ok();  // the Mythic+ build bonds with Verdant Embrace instead of Echoing
+  s.merithra_chance = s.T( "merithra", s.k_mplus ? 0.11 : s.merithra_chance );
+  if ( s.k_lifebind )
+    s.lifebind = make_buff( this, "lifebind", find_spell( 373267 ) )->set_duration( timespan_t::from_seconds( s.T( "lifebind_dur", 8.0 ) ) );
+  if ( s.k_lifespark )
+    s.lifespark = make_buff( this, "lifespark", find_spell( 443176 ) )->set_max_stack( 2 );
+  if ( s.k_flow )
+    s.flow = make_buff( this, "flow_state", find_spell( 390148 ) )
+                 ->set_default_value( ST( "Flow State" )->effectN( 1 ).percent() )
+                 ->set_duration( 10_s );
+  s.energy_gain = get_gain( "energy_loop" );
 
   s.merithra            = make_buff( this, "merithra_blessing_ready" )->set_duration( 30_s );
   s.temporal_compression = make_buff( this, "temporal_compression", find_spell( 362877 ) );
@@ -1031,6 +1196,40 @@ void evoker_t::create_pres_heal_actions()
   s.seedling        = s.fluttering->ok() ? get_secondary_action<seedling_t>( "fluttering_seedlings" ) : nullptr;
   if ( talent.panacea.ok() )
     s.panacea_heal = get_secondary_action<heals::panacea_t>( "panacea_pres", "panacea_pres" );
+  if ( s.lifebind )
+  {
+    auto* a      = new flat_heal_t( this, "lifebind", 373268 );
+    a->transfers = false;
+    s.lifebind_heal = a;
+  }
+  if ( s.k_lgf )
+    s.lgf_heal = new flat_heal_t( this, "life_givers_flame", 371441 );
+  // Preternatural Antivenom (270171): about every 22 s an ally is infused and heals most of the damage it takes
+  if ( find_item_by_id( 270171 ) )
+  {
+    s.av_heal = new flat_heal_t( this, "preternatural_antivenom", 1305921 );
+    sim->heal_damage_callbacks.push_back( [ this ]( player_t* t, double amount ) {
+      auto& r = *pres;
+      if ( !r.av_heal || t != r.av_target || sim->current_time() > r.av_until || r.av_left <= 0 )
+        return;
+      double h = std::min( r.T( "av_share", 0.75 ) * amount, r.av_left );
+      r.av_left -= h;
+      r.av_heal->execute_on_target( t, h );
+    } );
+    register_combat_begin( [ this ]( player_t* ) {
+      pres->av_target = nullptr;
+      pres->av_left   = 0.0;
+      make_repeating_event( *sim, timespan_t::from_seconds( pres->T( "av_period", 21.7 ) ), [ this ] {
+        auto& r     = *pres;
+        auto l      = r.allies();
+        if ( l.empty() )
+          return;
+        r.av_target = l[ rng().range( l.size() ) ];
+        r.av_until  = sim->current_time() + 8_s;
+        r.av_left   = r.T( "av_cap", 1600000.0 );
+      } );
+    } );
+  }
   if ( s.tier_2pc )
     s.lf_set = get_secondary_action<living_flame_hit_t>( "living_flame_tier", "living_flame_tier", 1.0 );
   if ( talent.flameshaper.twin_flame.ok() )
@@ -1060,6 +1259,8 @@ action_t* evoker_t::create_action_pres_heal( std::string_view name, std::string_
     return new living_flame_t( this, options_str );
   if ( name == "fire_breath" )
     return new fire_breath_t( this, options_str );
+  if ( name == "disintegrate" )
+    return new disintegrate_pres_t( this, options_str );
   if ( name == "stasis" )
     return new stasis_t( this, options_str );
   if ( name == "stasis_release" )
@@ -1091,6 +1292,35 @@ void evoker_t::apl_pres_heal()
   }
   if ( k.k_ta )
     def->add_action( "temporal_anomaly" );
+  if ( k.k_mplus )
+  {
+    // Mythic+ Preservation (logs: Merithra's Blessing on every charge, Verdant Embrace / Dream Breath / Fire Breath on
+    // cooldown, Emerald Blossom on every free Essence, Living Flame and Disintegrate in between)
+    if ( k.k_merithra )
+      def->add_action( "merithra_blessing" );
+    else
+      def->add_action( "reversion" );
+    if ( k.k_ve )
+      def->add_action( "verdant_embrace" );
+    if ( k.k_db )
+      def->add_action( "dream_breath" );
+    def->add_action( "fire_breath,if=injured_90>=1" );
+    // "need" gates stand for the healer looking at the raid frames: cast the spender when enough allies are hurt
+    auto need = [ &k ]( const char* name, int hp, int n ) {
+      return "injured_" + std::to_string( static_cast<int>( k.T( ( std::string( name ) + "_hp" ).c_str(), hp ) ) ) +
+             ">=" + std::to_string( static_cast<int>( k.T( ( std::string( name ) + "_n" ).c_str(), n ) ) );
+    };
+    if ( k.fluttering->ok() )
+      def->add_action( "emerald_blossom,if=buff.essence_burst.up&" + need( "eb", 85, 3 ) );
+    else if ( k.k_echo )  // without Seedlings the free Essence goes into Echo, which repeats the next heal
+      def->add_action( "echo,if=buff.essence_burst.up&echoed_allies<" + std::to_string( static_cast<int>( k.T( "echo_max", 2 ) ) ) + "&" +
+                       need( "echo", 85, 2 ) );
+    def->add_action( "living_flame,if=(buff.lifespark.up|buff.leaping_flames.up)&" + need( "lfs", 90, 2 ) );
+    def->add_action( "disintegrate,if=(essence>=3|buff.essence_burst.up)&mana.pct<" +
+                     std::to_string( static_cast<int>( k.T( "dis_mana", 95 ) ) ) );
+    def->add_action( "living_flame,if=" + need( "lf", 60, 4 ) );
+    return;
+  }
   if ( k.k_echo && k.k_merithra )
     def->add_action( "merithra_blessing,if=echoed_allies>=3" );
   // the log's cycle: Emerald Blossoms charge Twin Echoes, Echoes pile up, then the spender repeats them on every ally
