@@ -22,10 +22,11 @@ struct mw_heal_state_t
          *conduit_b = nullptr, *mana_tea_stacks = nullptr, *secret = nullptr;
 
   // actions
-  action_t *rm_hot = nullptr, *em_hot = nullptr, *em_hot2 = nullptr, *gust_a = nullptr, *im_a = nullptr, *zen_a = nullptr,
+  action_t *rm_hot = nullptr, *rm_hot2 = nullptr, *em_hot = nullptr, *em_hot2 = nullptr, *gust_a = nullptr, *im_a = nullptr, *zen_a = nullptr,
            *rwk_heal_a = nullptr, *rwk_dmg_a = nullptr, *soothing_breath_a = nullptr, *conduit_heal_a = nullptr,
            *ancient_a = nullptr, *cocoon_a = nullptr, *chi_wave_a = nullptr, *sanctuary_a = nullptr,
-           *revival_a = nullptr, *courage_a = nullptr, *yulons_grace_a = nullptr;
+           *revival_a = nullptr, *courage_a = nullptr, *yulons_grace_a = nullptr, *sf_soothing_a = nullptr,
+           *sf_cocoon_a = nullptr, *sanctuary_heal_a = nullptr;
 
   timespan_t cached_at = timespan_t::min();
   int cached_rm = 0;
@@ -52,6 +53,9 @@ struct mw_heal_state_t
   bool has_rm( player_t* tg ) const
   {
     auto* d = dot_of( rm_hot, tg );
+    if ( d && d->is_ticking() )
+      return true;
+    d = dot_of( rm_hot2, tg );
     return d && d->is_ticking();
   }
   bool has_em( player_t* tg ) const
@@ -115,8 +119,7 @@ struct mw_heal_state_t
     {
       if ( tg->is_sleeping() || tg == skip )
         continue;
-      auto* d = dot_of( hot, tg );
-      if ( d && d->is_ticking() )
+      if ( hot == rm_hot ? has_rm( tg ) : ( hot == em_hot ? has_em( tg ) : false ) )
         continue;
       double pc = tg->resources.pct( RESOURCE_HEALTH );
       if ( pc < bp )
@@ -135,6 +138,18 @@ struct mw_heal_state_t
       if ( !tg->is_sleeping() && tg != skip )
         l.push_back( tg );
     return l.empty() ? nullptr : l[ p->rng().range( l.size() ) ];
+  }
+
+  void spiritfont_proc()
+  {
+    if ( !spiritfont.ok() || !sf_soothing_a || !p->rng().roll( t( "sf_chance", 0.13 ) ) )
+      return;
+    double amt = 15300.0 * p->cache.spell_power( SCHOOL_NATURE ) / 3532.0 * t( "sf_cocoon", 1.4 );
+    for ( auto* tg : injured( 10, nullptr, false ) )
+      sf_cocoon_a->execute_on_target( tg, amt );
+    for ( int i = 0; i < 34; i++ )
+      if ( auto* tg = most_injured() )
+        sf_soothing_a->execute_on_target( tg );
   }
 
   // multiplier on everything the monk heals on one target
@@ -193,6 +208,10 @@ struct simple_heal_t : public mh_t
     background = proc = true;
     auto_target       = false;
     aoe               = 0;
+    dot_duration      = 0_ms;
+    base_tick_time    = 0_ms;
+    spell_power_mod.tick = 0;
+    channeled         = false;
   }
 };
 
@@ -240,7 +259,8 @@ struct gust_t : public mh_t
 // Renewing Mist HoT (the cast only starts it)
 struct rm_hot_t : public mh_t
 {
-  rm_hot_t( monk_t* pl ) : mh_t( pl, "renewing_mist_hot", pl->find_spell( 119611 ) )
+  bool shortv;
+  rm_hot_t( monk_t* pl, bool sv = false ) : mh_t( pl, sv ? "renewing_mist_rapid" : "renewing_mist_hot", pl->find_spell( 119611 ) ), shortv( sv )
   {
     background = proc = true;
     auto_target       = false;
@@ -248,9 +268,11 @@ struct rm_hot_t : public mh_t
     hasted_ticks      = true;
     tick_may_crit     = true;
     eff               = pl->mw->t( "rm", 1.0 );
-    if ( pl->mw->lotus_infusion.ok() )
+    if ( shortv )
+      dot_duration = timespan_t::from_seconds( pl->mw->rapid_diffusion.ok() ? pl->mw->rapid_diffusion->effectN( 1 ).base_value() : 6.0 );
+    else if ( pl->mw->lotus_infusion.ok() )
       dot_duration += timespan_t::from_millis( pl->mw->lotus_infusion->effectN( 2 ).base_value() );
-    pl->mw->rm_hot = this;
+    ( shortv ? pl->mw->rm_hot2 : pl->mw->rm_hot ) = this;
   }
 
   double composite_ta_multiplier( const action_state_t* a ) const override
@@ -272,7 +294,7 @@ struct rm_hot_t : public mh_t
   {
     mh_t::tick( d );
     auto& s = st();
-    if ( s.misty_peaks.ok() && rng().roll( s.t( "peaks", 0.10 ) ) )
+    if ( s.misty_peaks.ok() && rng().roll( s.t( "peaks", 0.06 ) ) )
       s.em_hot2->execute_on_target( d->target );
     // Renewing Mist moves on when it heals past full health
     if ( d->state->result_total > d->state->result_amount * 1.0 + 1.0 && d->remains() > 1_s )
@@ -383,7 +405,10 @@ struct em_t : public mh_t
     s.gust_a->execute_on_target( target );
     if ( s.rapid_diffusion.ok() )
       if ( auto* tg = s.most_injured_without( s.rm_hot, target ) )
-        s.rm_hot->execute_on_target( tg );
+      {
+        s.rm_hot2->execute_on_target( tg );
+        s.gust_a->execute_on_target( tg );
+      }
     if ( tft_used )
       s.tft->decrement();
   }
@@ -414,6 +439,10 @@ struct viv_t : public mh_t
           s.im_a->execute_on_target( tg );
     if ( s.mist_caller.ok() )
       s.gust_a->execute_on_target( p() );
+    s.spiritfont_proc();
+    if ( s.courage_a && p()->rng().roll( s.t( "courage", 0.29 ) ) )
+      if ( auto* tg = s.most_injured() )
+        s.courage_a->execute_on_target( tg );
     if ( s.zen_ready->check() && s.zen_a )
     {
       s.zen_ready->expire();
@@ -480,16 +509,21 @@ struct rwk_t : public monk_spell_t
         break;
       s.rwk_heal_a->execute_on_target( tg );
     }
+    s.spiritfont_proc();
     if ( s.rapid_diffusion.ok() )
       if ( auto* tg = s.most_injured_without( s.rm_hot ) )
-        s.rm_hot->execute_on_target( tg );
+      {
+        s.rm_hot2->execute_on_target( tg );
+        s.gust_a->execute_on_target( tg );
+      }
     if ( s.rising_mist.ok() )
     {
       for ( auto* tg : p()->sim->healing_no_pet_list )
       {
-        if ( auto* d = s.dot_of( s.rm_hot, tg ) )
-          if ( d->is_ticking() && d->remains() < 12_s )
-            s.rm_hot->execute_on_target( tg );
+        for ( action_t* a : { s.rm_hot, s.rm_hot2, s.em_hot } )
+          if ( auto* d = s.dot_of( a, tg ) )
+            if ( d->is_ticking() && d->remains() < timespan_t::from_seconds( s.t( "rising_cap", 24.0 ) ) )
+              d->adjust_duration( timespan_t::from_seconds( s.t( "rising_ext", 4.0 ) ), timespan_t::min(), 0u, false );
       }
     }
   }
@@ -583,13 +617,14 @@ struct cocoon_t : public mh_t
     base_dd_min = base_dd_max = 0;
     spell_power_mod.direct    = 0;
     use_target                = false;
+    cooldown->duration        = timespan_t::from_seconds( pl->mw->t( "cocoon_cd", 80.0 ) );
   }
   void execute() override
   {
     mh_t::execute();
     auto& s = *p()->mw;
-    double amt = 11.0 * p()->cache.spell_power( SCHOOL_NATURE ) * ( 1.0 + p()->cache.heal_versatility() ) *
-                 s.t( "cocoon", 1.0 );
+    double amt = p()->resources.max[ RESOURCE_HEALTH ] * data().effectN( 3 ).percent() *
+                 ( 1.0 + p()->cache.heal_versatility() ) * s.t( "cocoon", 1.15 );
     s.cocoon_a->execute_on_target( s.most_injured(), amt );
   }
 };
@@ -611,7 +646,7 @@ struct conduit_t : public monk_spell_t
     monk_spell_t::tick( d );
     auto& s = *p()->mw;
     int n   = 0;
-    for ( auto* tg : s.injured( 5 ) )
+    for ( auto* tg : s.injured( (size_t)s.t( "conduit_n", 19 ) ) )
     {
       (void)n;
       s.conduit_heal_a->execute_on_target( tg );
@@ -713,6 +748,7 @@ void monk_t::create_mw_heal_actions()
     s.spiritfont_b = make_buff( this, "spiritfont_mw", find_spell( 1260565 ) )->set_max_stack( 1 );
 
   s.rm_hot = new mwheal::rm_hot_t( this );
+  s.rm_hot2 = new mwheal::rm_hot_t( this, true );
   s.em_hot = new mwheal::em_hot_t( this );
   s.em_hot2 = new mwheal::em_hot_t( this, true );
   s.gust_a = new mwheal::gust_t( this );
@@ -730,8 +766,8 @@ void monk_t::create_mw_heal_actions()
   }
   {
     auto* a = new mwheal::simple_heal_t( this, "soothing_breath", 343737 );
-    a->eff  = s.t( "yulon", 1.0 );
-    a->dot_duration = 25_s;
+    a->spell_power_mod.direct = 0.7;
+    a->eff  = s.t( "yulon", 8.25 );
     s.soothing_breath_a = a;
   }
   {
@@ -741,8 +777,46 @@ void monk_t::create_mw_heal_actions()
   }
   new mwheal::rwk_heal_t( this );
   s.cocoon_a = new mwheal::flat_absorb_t( this, "life_cocoon_shield", 116849 );
+  s.sf_cocoon_a = new mwheal::flat_absorb_t( this, "chi_cocoon", 116849 );
+  {
+    auto* a = new mwheal::simple_heal_t( this, "spiritfont_soothing", 115175 );
+    a->spell_power_mod.direct = 0.82 * s.t( "sf_soothing", 1.0 );
+    a->use_target = false;
+    s.sf_soothing_a = a;
+  }
+  if ( s.courage_of_the_white_tiger.ok() )
+  {
+    auto* a = new mwheal::simple_heal_t( this, "courage_of_the_white_tiger", 443106 );
+    a->spell_power_mod.direct = 18.4 * s.t( "courage_eff", 1.0 );
+    a->use_target = false;
+    s.courage_a = a;
+  }
+  if ( s.silent_sanctuary.ok() )
+  {
+    auto* a = new mwheal::simple_heal_t( this, "silent_sanctuary", 1266720 );
+    a->eff = s.t( "sanctuary", 1.5 );
+    a->use_target = false;
+    s.sanctuary_heal_a = a;
+  }
+
 
   register_combat_begin( [ this ]( player_t* ) {
+    auto& st0 = *mw;
+    if ( st0.soothing_breath_a )
+      make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "yulon_int", 1.15 ) ), [ this ] {
+        auto& st = *mw;
+        if ( st.yulon_b->check() )
+          for ( auto* tg : st.injured( 3, nullptr, false ) )
+            st.soothing_breath_a->execute_on_target( tg );
+      } );
+    if ( st0.sanctuary_heal_a )
+      make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "sanct_int", 7.5 ) ), [ this ] {
+        mw->sanctuary_heal_a->execute_on_target( this );
+      } );
+    if ( st0.yulons_grace_a )
+      make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "grace_int", 2.2 ) ), [ this ] {
+        mw->yulons_grace_a->execute_on_target( this, resources.max[ RESOURCE_HEALTH ] * 0.0087 );
+      } );
     // Mana Tea: one stack per slice of mana spent
     make_repeating_event( *sim, 1_s, [ this ] {
       auto& st      = *mw;
@@ -836,7 +910,7 @@ void monk_t::apl_mw_heal()
   def->add_action( "invoke_yulon,if=group_size>=10&time>10" );
   def->add_action( "celestial_conduit,if=group_size>=10&time>10" );
   def->add_action( "revival,if=injured_60>=6" );
-  def->add_action( "life_cocoon,if=injured_40>=1" );
+  def->add_action( "life_cocoon,if=injured_60>=1" );
   def->add_action( "mana_tea,if=mana.pct<85" );
   def->add_action( "thunder_focus_tea" );
   def->add_action( "renewing_mist" );
