@@ -541,7 +541,13 @@ std::string monk_t::default_temporary_enchant() const
 
 void monk_t::init_action_list()
 {
-  if ( action_list_str.empty() )
+  if ( action_list_str.empty() && mw_heal_mode() )  // wowhub
+  {
+    clear_action_priority_lists();
+    apl_mw_heal();
+    use_default_action_list = true;
+  }
+  else if ( action_list_str.empty() )
   {
     clear_action_priority_lists();
 
