@@ -16,7 +16,7 @@ struct resto_heal_state_t
 
   // buffs
   buff_t *tidal = nullptr, *coalescing = nullptr, *asc = nullptr, *surging = nullptr, *whirling_earth = nullptr,
-         *whirling_water = nullptr, *whirling_air = nullptr, *stormstream_ready = nullptr, *slt = nullptr;
+         *whirling_water = nullptr, *whirling_air = nullptr, *stormstream_ready = nullptr, *slt = nullptr, *hst_up = nullptr, *storm_up = nullptr;
 
   // actions
   action_t *riptide_a = nullptr, *chain_a = nullptr, *rain_tick = nullptr, *tidewaters_a = nullptr,
@@ -175,10 +175,9 @@ struct earthliving_t : public rh_heal_t
     background = proc = true;
     auto_target       = false;
     dot_duration      = data().duration();
-    if ( pl->talent.imbuement_mastery.ok() )
-      dot_duration += timespan_t::from_millis( pl->talent.imbuement_mastery->effectN( 3 ).base_value() );
     if ( pl->rh->improved_earthliving.ok() )
       mastery_share = 1.0 + pl->rh->improved_earthliving->effectN( 1 ).percent();
+    effectiveness = 1.45;  // logs: Earthliving ticks are ~1.45x what the tooltip data gives (unexplained)
     base_tick_time = pl->find_spell( 382024 )->effectN( 1 ).period();
     hasted_ticks   = true;
     tick_may_crit  = true;
@@ -226,15 +225,7 @@ struct riptide_t : public rh_heal_t
     parse_options( options_str );
     auto& s = *pl->rh;
     s.riptide_a = this;
-    if ( s.wavespeakers.ok() )
-    {
-      dot_duration += timespan_t::from_millis( s.wavespeakers->effectN( 1 ).base_value() );
-      base_td_multiplier *= 1.0 + s.wavespeakers->effectN( 2 ).percent();
-    }
-    if ( s.echo_of_elements.ok() )
-      cooldown->charges += 1;
-    if ( s.rip_current.ok() )
-      cooldown->duration += timespan_t::from_millis( s.rip_current->effectN( 1 ).base_value() );
+    // Wavespeaker's Blessing, Echo of the Elements and Rip Current come from the engine's talent parsing
     dot_behavior = dot_behavior_e::DOT_REFRESH_PANDEMIC;
   }
 
@@ -321,15 +312,8 @@ struct chain_heal_t : public rh_heal_t
     deluge_applies = true;
     auto& s        = *pl->rh;
     s.chain_a      = this;
-    aoe            = 4;
-    chain_multiplier = 0.7;
-    if ( s.ancestral_reach.ok() )
-    {
-      aoe += 1;
-      effectiveness *= 1.0 + s.ancestral_reach->effectN( 2 ).percent();
-    }
-    base_aoe   = aoe;
-    base_chain = chain_multiplier;
+    base_aoe       = 0;
+    base_chain     = 1.0;
   }
 
   timespan_t execute_time() const override
@@ -359,6 +343,11 @@ struct chain_heal_t : public rh_heal_t
     auto& s = st();
     if ( !lively )
       s.chain_a = this;
+    if ( !base_aoe )  // the engine has applied Ancestral Reach by now
+    {
+      base_aoe   = aoe;
+      base_chain = chain_multiplier;
+    }
     aoe              = base_aoe;
     chain_multiplier = base_chain;
     if ( s.asc->check() )
@@ -501,15 +490,6 @@ struct rain_tick_t : public rh_heal_t
     aoe        = 6;
     auto_target = true;
   }
-  double extra_mult( const action_state_t* ) const override
-  {
-    double m = 1.0;
-    if ( st().soothing_rain.ok() )
-      m *= 1.0 + st().soothing_rain->effectN( 1 ).percent();
-    if ( p()->talent.surging_totem.ok() )
-      m *= 1.0 + p()->find_spell( 455630 )->effectN( 3 ).percent();
-    return m;
-  }
 };
 
 struct surging_totem_t : public spell_t
@@ -585,7 +565,7 @@ inline void rh_heal_t::roll_tier2( const action_state_t* s )
   auto& r = st();
   if ( !r.tier2 || !r.extra_rain || background )
     return;
-  if ( !rng().roll( 0.05 ) )
+  if ( !rng().roll( 0.20 ) )
     return;
   int gen      = ++r.extra_rain_gen;
   timespan_t end = sim->current_time() + p()->find_spell( 1296629 )->effectN( 1 ).time_value();
@@ -613,7 +593,7 @@ inline void rh_heal_t::roll_tier2( const action_state_t* s )
 }
 
 // Healing Stream Totem and its Stormstream upgrade
-constexpr double hst_calibration = 0.62;  // logs: Healing Stream hits are ~0.6x what the tooltip data gives (unexplained)
+constexpr double hst_calibration = 0.70;  // logs: Healing Stream hits are ~0.6x what the tooltip data gives (unexplained)
 
 struct hst_pulse_t : public rh_heal_t
 {
@@ -631,10 +611,6 @@ struct hst_pulse_t : public rh_heal_t
     double m = stage * hst_calibration;
     if ( s->chain_target < weights.size() )
       m *= weights[ s->chain_target ];
-    if ( storm && st().stormstream_proc.ok() )
-      m *= 1.0 + st().stormstream_proc->effectN( 2 ).percent();
-    if ( st().stormstream_power.ok() )
-      m *= 1.0 + st().stormstream_power->effectN( 1 ).percent();
     return m;
   }
 
@@ -656,10 +632,6 @@ struct healing_stream_totem_t : public spell_t
     harmful = false;
     may_miss = may_crit = false;
     auto& s = *pl->rh;
-    if ( s.water_totem_mastery.ok() )
-      cooldown->duration += timespan_t::from_millis( s.water_totem_mastery->effectN( 1 ).base_value() );
-    if ( pl->talent.totemic_momentum.ok() )
-      cooldown->duration += timespan_t::from_millis( pl->talent.totemic_momentum->effectN( 3 ).base_value() );
     if ( storm )
     {
       cooldown = pl->get_cooldown( "stormstream_totem_free" );
@@ -684,7 +656,8 @@ struct healing_stream_totem_t : public spell_t
     if ( storm )
       s.stormstream_ready->expire();
     int gen = storm ? ++s.storm_gen : ++s.hst_gen;
-    timespan_t dur = data().duration();
+    timespan_t dur = data().duration() + ( p()->talent.totemic_focus.ok() ? p()->talent.totemic_focus->effectN( 2 ).time_value() : 0_ms );
+    ( storm ? s.storm_up : s.hst_up )->trigger( dur );
     int n = 1;
     if ( p()->talent.splitstream.ok() ) n += 1;
     if ( storm && s.stormstream_proc.ok() ) n += as<int>( s.stormstream_proc->effectN( 3 ).base_value() );
@@ -718,8 +691,7 @@ struct healing_stream_totem_t : public spell_t
       return;
     make_event( *sim, dt, [ this, gen, start, end, pulse, storm ] {
       auto& s = *p()->rh;
-      if ( gen != ( storm ? s.storm_gen : s.hst_gen ) )
-        return;
+      (void)gen;  // totems of the same kind can overlap in the logs
       double progress = ( sim->current_time() - start ) / ( end - start );
       pulse->stage    = s.living_stream.ok() ? 1.0 + s.living_stream->effectN( 1 ).percent() * ( 1.0 - progress ) : 1.0;
       pulse->execute_on_target( s.most_injured() );
@@ -780,6 +752,8 @@ void shaman_t::init_resto_heal()
 {
   rh      = new resto_heal_state_t( this );
   auto& s = *rh;
+  // the class passive's -36% mana regeneration is meant for the damage specs
+  resources.base_regen_per_second[ RESOURCE_MANA ] /= 1.0 + find_spell( 137038 )->effectN( 1 ).percent();
   auto ST = [ this ]( std::string_view n ) { return find_talent_spell( talent_tree::SPECIALIZATION, n ); };
   auto CT = [ this ]( std::string_view n ) { return find_talent_spell( talent_tree::CLASS, n ); };
   s.riptide              = ST( "Riptide" );
@@ -825,6 +799,8 @@ void shaman_t::create_resto_heal_actions()
   s.whirling_earth = make_buff( this, "whirling_earth_rh", find_spell( 453406 ) );
   s.whirling_water = make_buff( this, "whirling_water_rh", find_spell( 453407 ) );
   s.whirling_air   = make_buff( this, "whirling_air_rh", find_spell( 453409 ) );
+  s.hst_up   = make_buff( this, "healing_stream_totem_rh", find_spell( 5394 ) )->set_cooldown( 0_ms );
+  s.storm_up = make_buff( this, "stormstream_totem_rh", find_spell( 1267068 ) )->set_cooldown( 0_ms );
   s.stormstream_ready = make_buff( this, "stormstream_ready_rh", find_spell( 1267016 ) )->set_max_stack( 1 )->set_duration( 120_s );
 
   if ( talent.lively_totems.ok() )
@@ -877,9 +853,10 @@ void shaman_t::create_resto_heal_actions()
           return;
         double amt = find_spell( 1300642 )->effectN( 1 ).sp_coeff() * cache.spell_power( SCHOOL_NATURE ) *
                      composite_spell_power_multiplier() * ( 1.0 + cache.heal_versatility() );
+        // logs: the shields absorb ~0.6x of their size on average
         for ( int i = 0; i < 2; i++ )
           if ( auto* t = st.random_ally() )
-            st.cond_a->execute_on_target( t, amt );
+            st.cond_a->execute_on_target( t, amt * 0.62 );
       } );
     if ( st.wind_barrier_a )
       make_repeating_event( *sim, 30_s, [ this ] {
