@@ -42,8 +42,6 @@ struct resto_heal_state_t
   int extra_rain_gen = 0;
 
   int rain_gen = 0, hst_gen = 0, storm_gen = 0, riptide_casts = 0;
-  timespan_t cached_at = timespan_t::min();
-  int cached_riptides = 0;
   double rain_cover = 0.85;      // share of the raid standing in the rain/totem area
   double spec_mult  = 1.0;       // core passive of the spec that the tooltip data does not spell out
 
@@ -59,16 +57,12 @@ struct resto_heal_state_t
     return d && d->is_ticking();
   }
 
-  int riptide_count()
+  int riptide_count() const
   {
-    if ( cached_at == p->sim->current_time() )
-      return cached_riptides;
     int n = 0;
     for ( auto* t : p->sim->healing_no_pet_list )
       if ( !t->is_sleeping() && has_riptide( t ) )
         n++;
-    cached_at       = p->sim->current_time();
-    cached_riptides = n;
     return n;
   }
 
@@ -183,8 +177,7 @@ struct rh_heal_t : public heal_t
   {
     if ( !st().earthliving.ok() || !st().earthliving_a )
       return;
-    double chance = st().earthliving->effectN( 1 ).percent();
-    chance        = 0.20 * ( st().ancestral_awakening.ok() ? 0.65 : 1.0 );  // logs: ~0.65x the applications in the Mythic+ build
+    double chance = 0.20 * ( st().ancestral_awakening.ok() ? 0.65 : 1.0 );  // logs: ~0.65x the applications in the Mythic+ build
     if ( always || rng().roll( chance ) )
       st().earthliving_a->execute_on_target( s->target );
   }
@@ -312,7 +305,8 @@ struct riptide_t : public rh_heal_t
       s.tidal->trigger();
     s.riptide_casts++;
     // Primal Tide Core: every Nth Riptide also lands on another ally
-    if ( s.primal_tide_core.ok() && s.riptide_casts % as<int>( s.primal_tide_core->effectN( 1 ).base_value() ) == 0 )
+    int every = s.primal_tide_core.ok() ? as<int>( s.primal_tide_core->effectN( 1 ).base_value() ) : 0;
+    if ( every > 0 && s.riptide_casts % every == 0 )
       if ( auto* t = s.most_injured( execute_state->target ) )
         execute_on_target_free( t );
     if ( s.deeply_rooted.ok() && rng().roll( s.deeply_rooted->effectN( 4 ).percent() ) )
@@ -595,6 +589,8 @@ struct surging_totem_t : public spell_t
   {
     auto& s = *p()->rh;
     timespan_t dt = p()->find_spell( 73920 )->effectN( 3 ).period() * p()->cache.spell_haste();
+    if ( dt <= 0_ms )
+      return;
     if ( sim->current_time() + dt > end )
       return;
     make_event( *sim, dt, [ this, gen, end ] {
@@ -654,6 +650,8 @@ inline void rh_heal_t::roll_tier2( const action_state_t* s )
     {
       auto& r       = *pl->rh;
       timespan_t dt = pl->find_spell( 73920 )->effectN( 3 ).period() * pl->cache.spell_haste();
+      if ( dt <= 0_ms )
+        return;
       if ( pl->sim->current_time() + dt > end )
         return;
       make_event( *pl->sim, dt, [ pl, gen, end ] {
@@ -1107,6 +1105,7 @@ void shaman_t::create_resto_heal_actions()
     s.wind_barrier_a = new rheal::flat_absorb_t( this, "wind_barrier", 457387 );
   register_combat_begin( [ this ]( player_t* ) {
     auto& st = *rh;
+    st.riptide_casts = 0;
     st.es_targets.clear();
     st.es_ready.clear();
     st.av_target = nullptr;

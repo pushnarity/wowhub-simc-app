@@ -4339,7 +4339,9 @@ void priest_t::reset()
 {
   base_t::reset();
 
-  piety_pool = 0;  // wowhub
+  piety_pool  = 0;  // wowhub
+  hymn_stacks = 0;
+  hymn_until  = 0_s;
 
   // Reset Target Data
   for ( player_t* target : sim->target_list )

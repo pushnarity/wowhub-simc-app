@@ -1149,7 +1149,8 @@ void evoker_t::init_pres_heal()
   if ( s.k_flow )
     s.flow = make_buff( this, "flow_state", find_spell( 390148 ) )
                  ->set_default_value( ST( "Flow State" )->effectN( 1 ).percent() )
-                 ->set_duration( 10_s );
+                 ->set_duration( 10_s )
+                 ->add_invalidate( CACHE_SPELL_HASTE );
   s.energy_gain = get_gain( "energy_loop" );
 
   s.merithra            = make_buff( this, "merithra_blessing_ready" )->set_duration( 30_s );
@@ -1177,6 +1178,9 @@ void evoker_t::init_pres_heal()
   } );
   register_combat_begin( [ this ]( player_t* ) {
     pres->hurt.clear();
+    pres->stasis_on    = false;  // a Stasis still open when the last fight ended
+    pres->stasis_start = 0;
+    pres->stored.clear();
   } );
 }
 

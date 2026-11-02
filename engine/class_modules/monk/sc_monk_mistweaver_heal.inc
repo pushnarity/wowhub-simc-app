@@ -26,7 +26,7 @@ struct mw_heal_state_t
   action_t *rm_hot = nullptr, *rm_hot2 = nullptr, *em_hot = nullptr, *em_hot2 = nullptr, *gust_a = nullptr, *im_a = nullptr, *zen_a = nullptr,
            *rwk_heal_a = nullptr, *rwk_dmg_a = nullptr, *soothing_breath_a = nullptr, *conduit_heal_a = nullptr,
            *ancient_a = nullptr, *cocoon_a = nullptr, *chi_wave_a = nullptr, *sanctuary_a = nullptr,
-           *revival_a = nullptr, *courage_a = nullptr, *yulons_grace_a = nullptr, *sf_soothing_a = nullptr,
+           *revival_a = nullptr, *courage_a = nullptr, *sf_soothing_a = nullptr,
            *sf_cocoon_a = nullptr, *sanctuary_heal_a = nullptr;
 
   // fistweaving build (Chi-Ji, Ancient Teachings, Way of the Crane): only when those talents are picked
@@ -133,7 +133,7 @@ struct mw_heal_state_t
     {
       if ( tg->is_sleeping() || tg == skip )
         continue;
-      if ( hot == rm_hot ? has_rm( tg ) : ( hot == em_hot ? has_em( tg ) : false ) )
+      if ( hot == rm_hot || hot == rm_hot2 ? has_rm( tg ) : ( hot == em_hot ? has_em( tg ) : false ) )
         continue;
       double pc = tg->resources.pct( RESOURCE_HEALTH );
       if ( pc < bp )
@@ -689,7 +689,8 @@ struct cocoon_t : public mh_t
     auto& s = *p()->mw;
     double amt = p()->resources.max[ RESOURCE_HEALTH ] * data().effectN( 3 ).percent() *
                  ( 1.0 + p()->cache.heal_versatility() ) * s.tf( "cocoon", 1.15, 1.8 );
-    s.cocoon_a->execute_on_target( s.most_injured(), amt );
+    if ( player_t* t = s.most_injured() )
+      s.cocoon_a->execute_on_target( t, amt );
   }
 };
 
@@ -1157,10 +1158,6 @@ void monk_t::create_mw_heal_actions()
     if ( st0.sanctuary_heal_a )
       make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "sanct_int", 7.5 ) ), [ this ] {
         mw->sanctuary_heal_a->execute_on_target( this );
-      } );
-    if ( st0.yulons_grace_a )
-      make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "grace_int", 2.2 ) ), [ this ] {
-        mw->yulons_grace_a->execute_on_target( this, resources.max[ RESOURCE_HEALTH ] * 0.0087 );
       } );
     if ( st0.fist )
     {

@@ -1152,7 +1152,8 @@ struct heal_replay_t
         if ( kind == "target" )
         {
           int i; target_t t; int tank;
-          in >> i >> t.max_health >> tank;
+          if ( !( in >> i >> t.max_health >> tank ) || i < 0 || i > 1000 )
+            throw std::invalid_argument( fmt::format( "heal_replay {}: bad target line", path ) );
           t.tank = tank != 0;
           if ( i >= as<int>( slot->targets.size() ) )
             slot->targets.resize( i + 1 );
@@ -1161,17 +1162,24 @@ struct heal_replay_t
         else if ( kind == "e" )
         {
           event_t e;
-          in >> e.t >> e.slot >> e.damage >> e.heal;
+          if ( !( in >> e.t >> e.slot >> e.damage >> e.heal ) )
+            throw std::invalid_argument( fmt::format( "heal_replay {}: bad event line", path ) );
           slot->events.push_back( e );
         }
         else if ( kind == "m" )
         {
           mana_t m;
-          in >> m.t >> m.amount;
+          if ( !( in >> m.t >> m.amount ) )
+            throw std::invalid_argument( fmt::format( "heal_replay {}: bad mana line", path ) );
           slot->mana.push_back( m );
         }
         else
           std::getline( in, kind );  // comment or unknown line
+      }
+      if ( slot->targets.empty() )
+      {
+        slot.reset();
+        throw std::invalid_argument( fmt::format( "heal_replay {}: no such file, or no target lines in it", path ) );
       }
     }
     return slot.get();
@@ -1260,6 +1268,28 @@ struct heal_enemy_t : public enemy_t
     collected_data.htps.change_mode( false );
 
     true_level = std::min( sim->max_player_level, true_level );
+
+    // checked here so a bad file or profile stops the sim before it starts, with a message
+    if ( !sim->heal_replay.empty() )
+      heal_replay_t::get( sim->heal_replay );
+    // heal_damage_profile=<18 numbers, comma-separated, in profile_t order> tries a profile without a rebuild
+    if ( sim->heal_damage_profile.find( ',' ) != std::string::npos )
+    {
+      auto v = util::string_split<std::string_view>( sim->heal_damage_profile, "," );
+      if ( v.size() != 18 )
+        throw std::invalid_argument( fmt::format( "heal_damage_profile: {} numbers given, 18 needed", v.size() ) );
+      double* f = &custom.ambient;
+      for ( size_t i = 0; i < 16; i++ )
+        f[ i ] = util::to_double( v[ i ] );
+      custom.tanks     = util::to_int( v[ 16 ] );
+      custom.intensity = util::to_double( v[ 17 ] );
+      // an interval of zero would repeat at the same moment forever
+      for ( double every : { custom.ambient_every, custom.pulse_every_lo, custom.pulse_every_hi, custom.spot_every,
+                             custom.melee_every, custom.buster_every_lo, custom.buster_every_hi } )
+        if ( !( every >= 0.05 ) )
+          throw std::invalid_argument( "heal_damage_profile: every interval must be at least 0.05 seconds" );
+      has_custom = true;
+    }
   }
 
   resource_e primary_resource() const override
@@ -1275,6 +1305,7 @@ struct heal_enemy_t : public enemy_t
 
   const profile_t* active = nullptr;
   profile_t custom = {};
+  bool has_custom = false;
 
   void hurt( double share )
   {
@@ -1398,20 +1429,8 @@ struct heal_enemy_t : public enemy_t
     }
 
     const profile_t* pr = profile( profile_name() );
-    // heal_damage_profile=<18 numbers, comma-separated, in profile_t order> tries a profile without a rebuild
-    if ( !pr && sim->heal_damage_profile.find( ',' ) != std::string::npos )
-    {
-      auto v = util::string_split<std::string_view>( sim->heal_damage_profile, "," );
-      if ( v.size() == 18 )
-      {
-        double* f = &custom.ambient;
-        for ( size_t i = 0; i < 16; i++ )
-          f[ i ] = util::to_double( v[ i ] );
-        custom.tanks     = util::to_int( v[ 16 ] );
-        custom.intensity = util::to_double( v[ 17 ] );
-        pr = &custom;
-      }
-    }
+    if ( !pr && has_custom )
+      pr = &custom;
     sim->print_log( "{} healing profile '{}'", *this, pr ? profile_name() : "none" );
     if ( !pr )
       return;

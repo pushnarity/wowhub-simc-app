@@ -483,8 +483,9 @@ size_t heal_t::available_targets( std::vector<player_t*>& target_list ) const
   }
 
   // Smart heals reach the most injured allies first.
-  if ( auto_target && target_list.size() > 2 )
-    std::stable_sort( target_list.begin() + 1, target_list.end(), []( player_t* a, player_t* b ) {
+  size_t first = !target_list.empty() && target_list.front() == target ? 1 : 0;  // the chosen target stays first
+  if ( auto_target && target_list.size() > first + 1 )
+    std::stable_sort( target_list.begin() + first, target_list.end(), []( player_t* a, player_t* b ) {
       return a->resources.pct( RESOURCE_HEALTH ) < b->resources.pct( RESOURCE_HEALTH );
     } );
 

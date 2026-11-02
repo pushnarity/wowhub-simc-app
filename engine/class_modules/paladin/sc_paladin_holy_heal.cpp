@@ -749,7 +749,7 @@ struct holy_light_hp_t : public hpal_heal_t
   {
     timespan_t t = hpal_heal_t::execute_time();
     if ( p()->buffs.infusion_of_light->check() )
-      t += p()->buffs.infusion_of_light->data().effectN( 1 ).time_value();
+      t *= 1.0 + p()->buffs.infusion_of_light->data().effectN( 7 ).percent();  // effect 7: Holy Light cast time -30%
     return std::max( 0_ms, t );
   }
   void impact( action_state_t* s ) override
@@ -1218,7 +1218,7 @@ void paladin_t::create_holy_heal_actions()
       }
     } );
     if ( st.savior_shield )
-      make_repeating_event( *sim, timespan_t::from_millis( hpal->savior_2.ok() ? hpal->savior_2->effectN( 1 ).period().total_millis() : 8000 ), [ this ] {
+      make_repeating_event( *sim, timespan_t::from_millis( hpal->savior_2.ok() && hpal->savior_2->effectN( 1 ).period() > 0_ms ? hpal->savior_2->effectN( 1 ).period().total_millis() : 8000 ), [ this ] {
         auto& st = *hpal;
         if ( st.savior_target )
           st.savior_shield->execute_on_target( st.savior_target, savior_shield_amount() );
