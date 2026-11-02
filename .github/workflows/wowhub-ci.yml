@@ -1,0 +1,63 @@
+name: WoW Hub CI
+
+on:
+  push:
+    branches: [wowhub-healer]
+  pull_request:
+    branches: [wowhub-healer]
+  workflow_dispatch:
+
+concurrency:
+  group: wowhub-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_FLAGS: -G Ninja -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF
+
+jobs:
+  test:
+    name: Healers, damage, same seed, speed
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -yq ninja-build
+      - name: Build the engine
+        run: |
+          cmake -S . -B build $CMAKE_FLAGS -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target simc
+      - name: Run the checks
+        run: wowhub/ci/run.sh build/simc
+
+  memory:
+    name: Memory safety (AddressSanitizer + UndefinedBehaviorSanitizer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -yq ninja-build
+      - name: Build a checking engine
+        run: |
+          FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+          cmake -S . -B build $CMAKE_FLAGS -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="$FLAGS" -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build --target simc
+      - name: Run the checks on it
+        env:
+          ITER: "10"
+          SKIP_SPEED: "1"
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: wowhub/ci/run.sh build/simc
+
+  warnings:
+    name: Strict compiler warnings in our healer code
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -yq ninja-build
+      - name: Compile our files with -Wall -Wextra
+        run: |
+          cmake -S . -B build $CMAKE_FLAGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          python3 wowhub/ci/strict_warnings.py build

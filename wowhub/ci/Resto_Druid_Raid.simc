@@ -1,0 +1,16 @@
+# WoW Hub CI test healer: Resto Druid, a common raid talent build of this season.
+# Made up for testing: plain stats, no items, no real character.
+druid="CI_Resto_Druid_Raid"
+level=90
+race=night_elf
+role=heal
+spec=restoration
+class_talents=rejuvenation:1/frenzied_regeneration:1/starfire:1/starsurge:1/wild_growth:1/ursocs_spirit:1/verdant_heart:1/improved_natures_cure:1/nurturing_instinct:2/improved_barkskin:1/natural_recovery:1/astral_influence:1/thick_hide:1/wild_charge:1/soothe:1/aessinas_renewal:1/starlight_conduit:1/ursols_vortex:1/typhoon:1/stampeding_roar:1/feline_swiftness:1/lingering_healing:1/matted_fur:2/lycaras_teachings:2/gift_of_the_wild:1/oakskin:1/improved_stampeding_roar:1/forestwalk:2/symbiotic_relationship:1/heart_of_the_wild:1/innervate:1
+spec_talents=lifebloom:1/swiftmend:1/natures_swiftness:1/omen_of_clarity:1/overgrowth:1/prosperity:1/improved_regrowth:1/soul_of_the_forest:1/tranquility:1/efflorescence:1/ironbark:1/improved_wild_growth:1/flourish:1/germination:1/lifetreading:1/rampant_growth:1/renewing_surge:1/power_of_the_archdruid:1/unstoppable_growth:2/intensity:1/convoke_the_spirits:1/cenarius_guidance:1/thriving_vegetation:2/master_shapeshifter:1/nurturing_dormancy:1/abundance:1/reforestation:1/photosynthesis:1/everbloom:4
+hero_talents=thriving_growth:1/wildstalkers_power:1/strategic_infusion:1/hunt_beneath_the_open_skies:1/green_thumb:1/flower_walk:1/lethal_preservation:1/bond_with_nature:1/bursting_growth:1/implant:1/patient_custodian:1/root_network:1/rampancy:1/vigorous_creepers:1
+gear_intellect=3000
+gear_stamina=30000
+gear_crit_rating=900
+gear_haste_rating=1100
+gear_mastery_rating=800
+gear_versatility_rating=500

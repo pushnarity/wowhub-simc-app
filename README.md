@@ -1,5 +1,7 @@
 # WoW Hub healing sims (a modified SimulationCraft)
 
+[![WoW Hub CI](https://github.com/pushnarity/wowhub-simc-app/actions/workflows/wowhub-ci.yml/badge.svg?branch=wowhub-healer)](https://github.com/pushnarity/wowhub-simc-app/actions/workflows/wowhub-ci.yml)
+
 SimulationCraft is the best simulator World of Warcraft has, but it measures damage. Hand it a healer and it
 either refuses (Holy Paladin, Mistweaver Monk) or sims the damage the healer would do in their spare time.
 This fork teaches it to heal: a raid or a five-man group that takes damage the way real fights deal it, and
@@ -38,6 +40,24 @@ We run these checks on our own server after every change. The logged fights and 
 are Warcraft Logs' and their players' data, so they are not republished here; the engine needs none of it.
 A replay file is plain text, so anyone with their own Warcraft Logs API access can make one (see
 `heal_replay` below).
+
+## Automatic checks
+
+Every new version is built and checked on GitHub ([WoW Hub CI](.github/workflows/wowhub-ci.yml), the badge
+above), in three parts:
+
+- **Healers, damage, same seed, speed** (`wowhub/ci/run.sh`): fourteen made-up test healers (each spec's raid
+  and Mythic+ talent build, plain stats, no real character) each heal a sensible amount in their kind of fight,
+  a damage dealer still sims, the same random seed gives the same result twice, and no sim got more than 30%
+  slower than before (measured against a damage sim on the same machine; expected values in
+  `wowhub/ci/speed.txt`).
+- **Memory safety**: the same checks on an engine built with AddressSanitizer and UndefinedBehaviorSanitizer,
+  which stop at the first read or write outside memory, use of freed memory, or undefined arithmetic.
+- **Strict compiler warnings** (`wowhub/ci/strict_warnings.py`): our healer files compile with `-Wall -Wextra`
+  and no warning of their own.
+
+How close the healers come to real players is checked apart, on our server, against the private Warcraft Logs
+fights above.
 
 ## What changed, piece by piece
 
@@ -145,9 +165,10 @@ This is a modified version of SimulationCraft (https://github.com/simulationcraf
 (WoW Hub) from November 2026 on. The date and content of every change are in this branch's git history
 (`git log midnight..wowhub-healer`).
 
-- Added files (each carries a notice at its top): `engine/class_modules/paladin/sc_paladin_holy_heal.cpp`,
-  `engine/class_modules/sc_shaman_resto_heal.inc`, `engine/class_modules/sc_evoker_preservation_heal.inc`,
-  `engine/class_modules/monk/sc_monk_mistweaver_heal.inc`.
+- Added files: `engine/class_modules/paladin/sc_paladin_holy_heal.cpp`,
+  `engine/class_modules/sc_shaman_resto_heal.inc`, `engine/class_modules/sc_evoker_preservation_heal.inc` and
+  `engine/class_modules/monk/sc_monk_mistweaver_heal.inc` (each carries a notice at its top), and the checks in
+  `wowhub/ci/` and `.github/workflows/wowhub-ci.yml`.
 - Modified files (our changes are marked `// wowhub` where they are not obvious): `engine/action/heal.cpp`,
   `engine/action/heal.hpp`, `engine/class_modules/sc_enemy.cpp`, `engine/class_modules/sc_druid.cpp`,
   `engine/class_modules/sc_evoker.cpp`, `engine/class_modules/sc_shaman.cpp`,
