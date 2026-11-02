@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pushnarity (WoW Hub). Added to SimulationCraft in this fork; GPL-3.0 like the rest (see LICENSE).
 // wowhub: Restoration Shaman healing for healing sims (role=heal with healing targets).
 // Upstream SimC refuses Restoration healing; everything here is ours, is only created in healing sims, and is
 // included from sc_shaman.cpp (shaman_t lives in that file) so the weekly engine update rebases cleanly.

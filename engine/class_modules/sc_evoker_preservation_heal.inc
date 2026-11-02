@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pushnarity (WoW Hub). Added to SimulationCraft in this fork; GPL-3.0 like the rest (see LICENSE).
 // wowhub: Preservation Evoker healing for healing sims (role=heal with healing targets).
 // Included by sc_evoker.cpp (the evoker class lives in that one file). Upstream SimC has almost nothing for
 // Preservation; everything here is ours and is only created in healing sims, so weekly engine updates rebase

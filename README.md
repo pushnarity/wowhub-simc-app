@@ -1,3 +1,6 @@
+> **This is a modified version of SimulationCraft: WoW Hub's fork**, the engine behind [wow.pushnarity.com](https://wow.pushnarity.com/en/retail/sims/): SimulationCraft plus
+> healing sims for every healer spec. What we added, and how close it comes to real logs: [wowhub/README.md](wowhub/README.md).
+
 # [SimulationCraft](https://www.simulationcraft.org/) [![CI](https://github.com/simulationcraft/simc/workflows/CI/badge.svg)](https://github.com/simulationcraft/simc/actions?query=workflow%3ACI)
 ## Overview
 

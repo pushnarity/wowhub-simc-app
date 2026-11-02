@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pushnarity (WoW Hub). Added to SimulationCraft in this fork; GPL-3.0 like the rest (see LICENSE).
 // wowhub: Holy Paladin healing for healing sims (role=heal with healing targets).
 // Upstream SimC refuses Holy Paladin; everything here is ours and is only created in healing sims, so the
 // weekly engine update rebases cleanly. Mechanics were checked against Warcraft Logs events (Midnight,

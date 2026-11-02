@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pushnarity (WoW Hub). Added to SimulationCraft in this fork; GPL-3.0 like the rest (see LICENSE).
 // wowhub: Mistweaver Monk healing for healing sims (role=heal with healing targets).
 // Upstream SimC refuses Mistweaver; everything here is ours, is only created in healing sims, and is included from
 // sc_monk.cpp (monk_t and the monk action templates live in that file) so the weekly engine update rebases cleanly.
