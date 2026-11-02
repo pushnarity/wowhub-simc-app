@@ -32,6 +32,8 @@ struct pres_state_t
                      *fire_torrent = nullptr, *essence_well = nullptr, *legacy = nullptr, *ashes = nullptr,
                      *essence_burst_t = nullptr;
   bool tier_2pc = false, tier_4pc = false;
+  bool k_echo = false, k_db = false, k_ta = false, k_stasis = false, k_rewind = false, k_merithra = false, k_ve = false,
+       k_fb = false, k_leaping = false;  // what the character has learned (the priority list only names those)
 
   action_t *reversion_hot = nullptr, *golden = nullptr, *reversal = nullptr, *consume = nullptr, *db_hot = nullptr,
            *db_echo = nullptr, *lf_set = nullptr, *twin_flame = nullptr, *merithra_chain = nullptr;
@@ -279,7 +281,7 @@ struct twin_flame_heal_t : public pres_heal_t
   {
     pres_heal_t::execute();
     // 12.1 Preservation tier 2-piece: consuming Essence Burst sends a Living Flame as well
-    if ( st().lf_set && rng().roll( 0.74 ) )  // log: 56 tier Living Flames for 76 Essence Burst consumptions
+    if ( st().lf_set && rng().roll( 0.6 ) )  // logs: 38-56 tier Living Flames for 73-76 Essence Burst consumptions
       st().lf_set->execute_on_target( target );
   }
 };
@@ -293,7 +295,7 @@ struct living_flame_hit_t : public pres_heal_t
     auto_target       = true;
     green             = false;
     dot_duration      = base_tick_time = 0_ms;  // Ruby Embers is a Devastation talent
-    cal               = 1.1;
+    cal               = 1.0;
   }
   int n_targets() const override
   {
@@ -481,7 +483,7 @@ struct echo_t : public mana_essence_t
     auto& st      = *p()->pres;
     double e      = 0.70 * ( 1.0 + ( st.time_lord->ok() ? st.time_lord->effectN( 1 ).percent() : 0.0 ) );
     st.apply_echo( s->target, e );
-    if ( st.twin_echoes && st.twin_echoes->check() )
+    if ( st.twin_echoes_t->ok() && st.twin_echoes->check() )
     {
       st.twin_echoes->decrement();
       auto l = st.injured( 1, s->target );
@@ -739,11 +741,23 @@ struct rewind_t : public pres_heal_t
     dot_duration = base_tick_time = 0_ms;
     cooldown->duration = 240_s;
   }
+  // cast when the group has just been hurt (logs: Rewind heals 55-60% of the last 5 s of damage taken)
+  bool ready() override
+  {
+    if ( !pres_heal_t::ready() )
+      return false;
+    double sum = 0;
+    auto all   = st().allies();
+    for ( auto* t : all )
+      sum += t->resources.pct( RESOURCE_HEALTH );
+    return !all.empty() && sum / all.size() < 0.7;
+  }
+
   void execute() override
   {
     pres_heal_t::execute();
     for ( auto* t : st().allies() )
-      flat->execute_on_target( t, 1.5 * 0.55 * st().taken( t, 5.0 ) );
+      flat->execute_on_target( t, 0.33 * st().taken( t, 5.0 ) );
     if ( st().temporal_compression )
       st().temporal_compression->trigger();
   }
@@ -807,7 +821,7 @@ struct emerald_blossom_t : public mana_essence_t
   {
     essence_heal_t::execute();
     auto& s = *p()->pres;
-    if ( s.twin_echoes )
+    if ( s.twin_echoes_t->ok() )
       s.twin_echoes->trigger();
     if ( p()->talent.ancient_flame.ok() )
       p()->buff.ancient_flame->trigger();
@@ -974,8 +988,16 @@ void evoker_t::init_pres_heal()
 
   s.merithra            = make_buff( this, "merithra_blessing_ready" )->set_duration( 30_s );
   s.temporal_compression = make_buff( this, "temporal_compression", find_spell( 362877 ) );
-  if ( s.twin_echoes_t->ok() )
-    s.twin_echoes = make_buff( this, "twin_echoes", find_spell( 1242759 ) );
+  s.twin_echoes = make_buff( this, "twin_echoes", find_spell( 1242759 ) );
+  s.k_echo      = ST( "Echo" )->ok();
+  s.k_db        = ST( "Dream Breath" )->ok();
+  s.k_ta        = ST( "Temporal Anomaly" )->ok();
+  s.k_stasis    = ST( "Stasis" )->ok();
+  s.k_rewind    = ST( "Rewind" )->ok();
+  s.k_merithra  = s.merithra_3->ok();
+  s.k_ve        = talent.verdant_embrace.ok();
+  s.k_fb        = s.consume_flame->ok() || s.essence_well->ok() || s.fire_torrent->ok();
+  s.k_leaping   = talent.leaping_flames.ok();
 
   sim->heal_damage_callbacks.push_back( [ this ]( player_t* t, double amount ) {
     if ( !pres )
@@ -1055,21 +1077,45 @@ void evoker_t::apl_pres_heal()
   action_priority_list_t* def       = get_action_priority_list( "default" );
   precombat->add_action( "snapshot_stats" );
 
+  auto& k = *pres;
+  // mana paced over the fight: spend more freely early, keep a floor at the end
+  const std::string pace = "(fight_remains>600|mana.pct>=8+80*fight_remains%(time+fight_remains))";
   def->add_action( "potion" );
   def->add_action( "use_items" );
-  def->add_action( "rewind,if=time>=60" );
-  def->add_action( "stasis_release" );
-  def->add_action( "stasis,if=cooldown.dream_breath.up" );
-  def->add_action( "temporal_anomaly" );
-  def->add_action( "merithra_blessing,if=echoed_allies>=3" );
+  if ( k.k_rewind )
+    def->add_action( "rewind,if=time>=30" );
+  if ( k.k_stasis )
+  {
+    def->add_action( "stasis_release" );
+    def->add_action( "stasis,if=cooldown.dream_breath.up" );
+  }
+  if ( k.k_ta )
+    def->add_action( "temporal_anomaly" );
+  if ( k.k_echo && k.k_merithra )
+    def->add_action( "merithra_blessing,if=echoed_allies>=3" );
   // the log's cycle: Emerald Blossoms charge Twin Echoes, Echoes pile up, then the spender repeats them on every ally
-  def->add_action( "echo,if=(buff.essence_burst.up|essence>=2)&echoed_allies<4&buff.twin_echoes.up" );
-  def->add_action( "emerald_blossom,if=(buff.essence_burst.up|essence>=3)&buff.twin_echoes.stack<2&echoed_allies<4" );
-  def->add_action( "echo,if=(buff.essence_burst.up|essence>=2)&echoed_allies<4" );
-  def->add_action( "merithra_blessing" );
-  def->add_action( "dream_breath" );
-  def->add_action( "emerald_blossom,if=buff.essence_burst.up|essence>=4" );
-  def->add_action( "verdant_embrace" );
-  def->add_action( "fire_breath" );
-  def->add_action( "living_flame,if=buff.leaping_flames.up" );
+  if ( k.k_echo )
+  {
+    if ( k.twin_echoes_t->ok() )
+    {
+      def->add_action( "echo,if=(buff.essence_burst.up|essence>=2&" + pace + ")&echoed_allies<4&buff.twin_echoes.up" );
+      def->add_action( "emerald_blossom,if=(buff.essence_burst.up|essence>=3&" + pace + ")&buff.twin_echoes.stack<2&echoed_allies<4" );
+    }
+    def->add_action( "echo,if=(buff.essence_burst.up|essence>=2&" + pace + ")&echoed_allies<4" );
+  }
+  if ( k.k_merithra )
+    def->add_action( "merithra_blessing" );
+  else
+    def->add_action( "reversion" );
+  if ( k.k_db )
+    def->add_action( "dream_breath" );
+  def->add_action( "emerald_blossom,if=buff.essence_burst.up|essence>=4&" + pace );
+  if ( k.k_ve )
+    def->add_action( "verdant_embrace,if=" + pace );
+  if ( k.k_fb )
+    def->add_action( "fire_breath,if=" + pace );
+  if ( k.k_leaping )
+    def->add_action( "living_flame,if=buff.leaping_flames.up&" + pace );
+  else
+    def->add_action( "living_flame,if=mana.pct>60&" + pace );
 }
