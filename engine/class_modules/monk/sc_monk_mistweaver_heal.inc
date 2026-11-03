@@ -39,6 +39,7 @@ struct mw_heal_state_t
            *hit_bok = nullptr, *hit_sck = nullptr, *hit_jf = nullptr;
   cooldown_t* cd_rsk = nullptr;
   action_t *ox_a = nullptr, *ward_a = nullptr, *felheart_a = nullptr;
+  double felheart_amount = 0.0;
   timespan_t last_he = 0_ms;
 
   timespan_t cached_at = timespan_t::min();
@@ -479,7 +480,7 @@ struct viv_t : public mh_t
   viv_t( monk_t* pl, std::string_view opts ) : mh_t( pl, "vivify", pl->find_spell( 116670 ) )
   {
     parse_options( opts );
-    eff = pl->mw->t( "vivify", 1.95 );
+    eff = pl->mw->t( "vivify", heal_desc_number( pl, 116670, "$?c2[${$s1", 1.95 ) );  // the tooltip's Mistweaver multiplier
   }
   timespan_t execute_time() const override
   {
@@ -639,7 +640,7 @@ struct mana_tea_t : public monk_spell_t
     if ( st().mana_tea_stacks->check() > 0 )
     {
       st().mana_tea_stacks->decrement();
-      p()->resource_gain( RESOURCE_MANA, p()->resources.base[ RESOURCE_MANA ] * 0.0288 * st().t( "mana_tea_mult", 1.0 ),
+      p()->resource_gain( RESOURCE_MANA, p()->resources.base[ RESOURCE_MANA ] * data().effectN( 1 ).m_coefficient() * st().t( "mana_tea_mult", 1.0 ),
                           p()->get_gain( "mana_tea_mw" ) );
     }
   }
@@ -1109,7 +1110,7 @@ void monk_t::create_mw_heal_actions()
     if ( s.strength_of_the_black_ox.ok() )
     {
       auto* a = new mwheal::simple_heal_t( this, "strength_of_the_black_ox_heal", 443113 );
-      a->spell_power_mod.direct = s.t( "ox_sp", 4.5 );
+      a->spell_power_mod.direct = a->data().effectN( 1 ).sp_coeff() * s.t( "ox_sp", 3.0 );  // logs: ~3x the data per shield
       a->use_target             = false;
       s.ox_a                    = a;
     }
@@ -1122,15 +1123,20 @@ void monk_t::create_mw_heal_actions()
     }
     // Unstable Felheart Crystal (250255), an on-use shield
     if ( find_item_by_id( 250255 ) )
+    {
       s.felheart_a = new mwheal::flat_absorb_t( this, "unstable_felheart_crystal", 1255200 );
+      // the shield the item's level gives (spell 1266821)
+      s.felheart_amount = find_spell( 1266821 )->effectN( 1 ).average( find_item_by_id( 250255 ) );
+    }
     s.chiji_gust_a = new mwheal::cgust_t( this );
     s.chiji_coc_a  = new mwheal::flat_absorb_t( this, "chiji_chi_cocoon", 116849 );
     {
       auto* a = new mwheal::simple_heal_t( this, "sheiluns_gift_main", 399491 );
-      a->spell_power_mod.direct = s.t( "sg_main", 41.0 );
+      // logs: the main target takes ~8.55x the data's heal (the clouds gathered), the others ~1.54x
+      a->spell_power_mod.direct = a->data().effectN( 1 ).sp_coeff() * s.t( "sg_main", 8.55 );
       s.sg_main_a               = a;
       auto* b = new mwheal::simple_heal_t( this, "sheiluns_gift_other", 399491 );
-      b->spell_power_mod.direct = s.t( "sg_other", 7.4 );
+      b->spell_power_mod.direct = b->data().effectN( 1 ).sp_coeff() * s.t( "sg_other", 1.543 );
       s.sg_other_a              = b;
     }
     s.hit_rsk = new mwheal::hit_t( this, "rising_sun_kick_hit", 185099, 0, s.t( "rsk_dmg", 1.72 ) );
@@ -1174,7 +1180,7 @@ void monk_t::create_mw_heal_actions()
       if ( st0.felheart_a )
         make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "felheart_int", 135.0 ) ), [ this ] {
           if ( auto* tg = mw->most_injured() )
-            mw->felheart_a->execute_on_target( tg, mw->t( "felheart_amt", 780000.0 ) );
+            mw->felheart_a->execute_on_target( tg, mw->felheart_amount * mw->t( "felheart_amt", 1.0 ) );
         } );
       if ( st0.ox_a )
         make_repeating_event( *sim, timespan_t::from_seconds( st0.t( "ox_int", 7.0 ) ), [ this ] {

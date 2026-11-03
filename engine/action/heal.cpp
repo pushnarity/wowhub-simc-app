@@ -7,12 +7,15 @@
 #include "dot.hpp"
 #include "action_state.hpp"
 #include "action_callback.hpp"
+#include "dbc/dbc.hpp"
 #include "dbc/spell_data.hpp"
 #include "player/player.hpp"
 #include "player/stats.hpp"
 #include "sim/expressions.hpp"
 #include "sim/sim.hpp"
 #include "util/rng.hpp"
+#include "util/util.hpp"
+#include "fmt/format.h"
 
 heal_t::heal_t( util::string_view name, player_t* p ) : heal_t( name, p, spell_data_t::nil() ) {}
 
@@ -507,4 +510,45 @@ std::unique_ptr<expr_t> heal_t::create_expression( util::string_view name )
   }
 
   return spell_base_t::create_expression( name );
+}
+
+double heal_desc_number( const player_t* p, unsigned spell_id, std::string_view key, double fallback )
+{
+  const char* vars = p->dbc->spell_desc_vars( spell_id ).desc_vars();
+  if ( !vars )
+    return fallback;
+  std::string_view text( vars );
+  auto at = text.find( key );
+  if ( at == std::string_view::npos )
+    return fallback;
+  auto star = text.find( '*', at + key.size() );
+  if ( star == std::string_view::npos )
+    return fallback;
+  char* end   = nullptr;
+  double value = std::strtod( vars + star + 1, &end );
+  return end == vars + star + 1 ? fallback : value;
+}
+
+void heal_tune_apply( player_t& p )
+{
+  if ( p.sim->heal_tune.empty() )
+    return;
+  for ( auto pair : util::string_split<util::string_view>( p.sim->heal_tune, "/" ) )
+  {
+    auto colon = pair.find( ':' );
+    if ( colon == util::string_view::npos )
+      throw std::invalid_argument( fmt::format( "heal_tune: '{}' is not <action>:<multiplier>", pair ) );
+    auto name   = pair.substr( 0, colon );
+    double mult = util::to_double( std::string( pair.substr( colon + 1 ) ) );
+    if ( !( mult > 0.0 && mult < 100.0 ) )
+      throw std::invalid_argument( fmt::format( "heal_tune: multiplier {} for '{}' is out of range", mult, name ) );
+    for ( auto* a : p.action_list )
+      if ( ( a->type == ACTION_HEAL || a->type == ACTION_ABSORB ) && a->name_str == name )
+      {
+        if ( a->snapshot_flags & ( STATE_MUL_SPELL_DA | STATE_MUL_SPELL_TA ) )
+          a->base_multiplier *= mult;
+        else
+          p.sim->heal_tune_flat[ a ] = mult;  // a fixed-amount heal or shield: action_t::execute_on_target scales it
+      }
+  }
 }

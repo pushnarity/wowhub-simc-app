@@ -583,6 +583,9 @@ struct sim_t : private sc_thread_t
   bool count_overheal_as_heal;
   std::string heal_damage_profile;
   std::string heal_replay;  // file with a real fight's hits and other healers' heals per target
+  std::string heal_tune;    // per-spell healing multipliers from the weekly self-tune (heal_tune_apply)
+  // the same for heals and shields cast with a fixed amount (their own multipliers are off): applied to that amount
+  std::unordered_map<const action_t*, double> heal_tune_flat;
   double heal_damage_scale;
   // called whenever incoming damage lands on a healing target (or a replayed hit on the healer), for
   // "the next time they take damage" heals like Prayer of Mending

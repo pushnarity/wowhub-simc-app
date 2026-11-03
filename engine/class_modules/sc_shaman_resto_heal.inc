@@ -35,6 +35,7 @@ struct resto_heal_state_t
   int ht_gen = 0;
   // trinket stand-ins measured from logs (item effects the engine has no heal model for)
   action_t *av_heal = nullptr, *felheart_a = nullptr;
+  double av_cap = 0.0, av_share = 0.0, felheart_amount = 0.0;  // the trinkets' amounts at their item level (game data)
   player_t* av_target = nullptr;
   timespan_t av_until = timespan_t::min();
   double av_left = 0.0;
@@ -282,7 +283,7 @@ struct riptide_t : public rh_heal_t
   {
     rh_heal_t::impact( s );
     if ( s->result == RESULT_CRIT && st().resurgence.ok() )
-      p()->resource_gain( RESOURCE_MANA, 0.0048 * p()->resources.max[ RESOURCE_MANA ], p()->gain.resurgence );
+      p()->resource_gain( RESOURCE_MANA, heal_desc_number( p(), 16196, "$riptide=", 0.48 ) / 100.0 * p()->resources.max[ RESOURCE_MANA ], p()->gain.resurgence );
     roll_earthliving( s );
     roll_aa( s );
   }
@@ -442,7 +443,7 @@ struct chain_heal_t : public rh_heal_t
   {
     rh_heal_t::impact( s );
     if ( s->result == RESULT_CRIT && st().resurgence.ok() )
-      p()->resource_gain( RESOURCE_MANA, 0.0020 * p()->resources.max[ RESOURCE_MANA ], p()->gain.resurgence );
+      p()->resource_gain( RESOURCE_MANA, heal_desc_number( p(), 16196, "$chainheal=", 0.2 ) / 100.0 * p()->resources.max[ RESOURCE_MANA ], p()->gain.resurgence );
     roll_earthliving( s, st().whirling_earth->check() );
     if ( s->chain_target == 0 )
       roll_tier2( s );
@@ -526,7 +527,7 @@ struct healing_wave_t : public rh_heal_t
   {
     rh_heal_t::impact( s );
     if ( s->result == RESULT_CRIT && st().resurgence.ok() )
-      p()->resource_gain( RESOURCE_MANA, 0.0080 * p()->resources.max[ RESOURCE_MANA ], p()->gain.resurgence );
+      p()->resource_gain( RESOURCE_MANA, heal_desc_number( p(), 16196, "$healingwave=", 0.8 ) / 100.0 * p()->resources.max[ RESOURCE_MANA ], p()->gain.resurgence );
     roll_earthliving( s, st().improved_earthliving.ok() );
     roll_tier2( s );
     roll_aa( s );
@@ -1035,21 +1036,26 @@ void shaman_t::create_resto_heal_actions()
     s.ht_pulse = new rheal::ht_pulse_t( this );
   // Preternatural Antivenom (270171): about every 22 s an ally (mostly the tank) is infused and heals 75% of the damage
   // it takes, ~860k in all (logs: 87 infusions, 600k raw each plus the self-targeted share)
-  if ( find_item_by_id( 270171 ) )
+  if ( auto* item = find_item_by_id( 270171 ) )
   {
+    s.av_cap   = find_spell( 1295775 )->effectN( 1 ).average( item );
+    s.av_share = find_spell( 1295775 )->effectN( 2 ).percent();
     s.av_heal = new rheal::raw_heal_t( "preternatural_antivenom", this, 1305921 );
     sim->heal_damage_callbacks.push_back( [ this ]( player_t* t, double amount ) {
       auto& r = *rh;
       if ( !r.av_heal || t != r.av_target || sim->current_time() > r.av_until || r.av_left <= 0 )
         return;
-      double h = std::min( 0.75 * amount, r.av_left );
+      double h = std::min( r.av_share * amount, r.av_left );
       r.av_left -= h;
       r.av_heal->execute_on_target( t, h );
     } );
   }
   // Unstable Felheart Crystal (250255): on use every 2 min, an absorb of about 1.0M on the most injured ally
-  if ( find_item_by_id( 250255 ) )
-    s.felheart_a = new rheal::flat_absorb_t( this, "unstable_felheart_crystal", 1255200 );
+  if ( auto* item = find_item_by_id( 250255 ) )
+  {
+    s.felheart_a      = new rheal::flat_absorb_t( this, "unstable_felheart_crystal", 1255200 );
+    s.felheart_amount = find_spell( 1266821 )->effectN( 1 ).average( item );
+  }
   if ( s.spouting_spirits.ok() )
   {
     auto* a = new rheal::simple_heal_t( "spouting_spirits", this, 462384 );
@@ -1119,13 +1125,13 @@ void shaman_t::create_resto_heal_actions()
           t = r.random_ally( this );
         r.av_target = t;
         r.av_until  = sim->current_time() + 8_s;
-        r.av_left   = 410000.0;
+        r.av_left   = r.av_cap;
       } );
     if ( st.felheart_a )
       make_repeating_event( *sim, 123_s, [ this ] {
         auto& r = *rh;
         if ( player_t* t = r.most_injured() )
-          r.felheart_a->execute_on_target( t, 1300000.0 );
+          r.felheart_a->execute_on_target( t, r.felheart_amount );
       } );
     if ( st.es_heal )
     {

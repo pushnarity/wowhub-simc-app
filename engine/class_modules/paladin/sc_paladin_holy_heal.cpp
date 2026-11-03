@@ -1132,7 +1132,8 @@ void paladin_t::create_holy_heal_actions()
     s.sotr_mana = get_gain( "shield_of_the_righteous_mana" );
     s.sacred_word = new hpal::coef_heal_t( this, "sacred_word", 447246, find_spell( 447246 )->effectN( 1 ).sp_coeff(), true, s.T( "sw_scale", 1.0 ) );
     s.haa_heal = new hpal::coef_heal_t( this, "hammer_and_anvil_heal", 433722, find_spell( 433722 )->effectN( 1 ).sp_coeff(), false, s.T( "haa_scale", 1.0 ) );
-    s.dg_heal  = new hpal::divine_guidance_heal_t( this, s.T( "dg_coef", 2.8 ) );
+    // per ally: the tooltip's SP x 433106 s1 / 10; logs: ~1.4x that
+    s.dg_heal  = new hpal::divine_guidance_heal_t( this, find_spell( 433106 )->effectN( 1 ).base_value() / 10.0 * s.T( "dg_coef", 1.4 ) );
     if ( s.lightforged_blessing.ok() )
     {
       s.lfb_heal = new hpal::coef_heal_t( this, "lightforged_blessing", 403460, 0.0, false, s.T( "lfb_mult", 0.8 ) );

@@ -5466,6 +5466,9 @@ void action_t::execute_on_target( player_t* t, double amount )
 
   if ( amount >= 0.0 )
     base_dd_min = base_dd_max = amount;
+  if ( amount >= 0.0 && !sim->heal_tune_flat.empty() )  // wowhub: the weekly self-tune (heal_tune_apply)
+    if ( auto it = sim->heal_tune_flat.find( this ); it != sim->heal_tune_flat.end() )
+      base_dd_min = base_dd_max = amount * it->second;
 
   execute();
 }

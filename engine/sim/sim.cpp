@@ -6,6 +6,7 @@
 #include "sim.hpp"
 
 #include "buff/buff.hpp"
+#include "action/heal.hpp"  // wowhub: heal_tune_apply
 #include "class_modules/class_module.hpp"
 #include "dbc/dbc.hpp"
 #include "dbc/spell_query/spell_data_expr.hpp"
@@ -2886,6 +2887,7 @@ void sim_t::init()
       try
       {
         actor->init_finished();
+        heal_tune_apply( *actor );  // wowhub
       }
       catch ( const std::exception& )
       {
@@ -4014,6 +4016,7 @@ void sim_t::create_options()
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );
   add_option( opt_string( "heal_damage_profile", heal_damage_profile ) );
   add_option( opt_string( "heal_replay", heal_replay ) );
+  add_option( opt_string( "heal_tune", heal_tune ) );
   add_option( opt_float( "heal_damage_scale", heal_damage_scale, 0.0, 10.0 ) );
   add_option( opt_float( "dhaps_healing_weight", dhaps_healing_weight ) );
   add_option( opt_float( "scaling_normalized", scaling_normalized ) );
