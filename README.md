@@ -36,6 +36,11 @@ they healed. Whatever is left to heal is our healer's job, and the sim's total i
 100% means the sim healed exactly what the real player healed. The check also compares every spell's share
 of the healing, not only the total.
 
+The table is how each spec was built. Since then a weekly check replays that week's top logs for every spec
+(the current raid's first boss on Heroic and the season's first Mythic+ dungeon) and tunes each spell's healing
+toward the real players' (`heal_tune` below). The tuned numbers are not part of this repository: they live with
+the WoW Hub site and change weekly; this engine without them sims as built.
+
 We run these checks on our own server after every change. The logged fights and the players' characters
 are Warcraft Logs' and their players' data, so they are not republished here; the engine needs none of it.
 A replay file is plain text, so anyone with their own Warcraft Logs API access can make one (see
@@ -86,6 +91,14 @@ to heal. Here they take damage:
   only its owner.
 - **New action list expressions** for healer priority lists: how many allies are below 95/90/80/60% health,
   the raid's missing health, and the group size.
+
+### Spell values from the game data, and per-spell tuning
+
+- Where the effect data leaves a number out but a spell's tooltip formula has it, the engine reads the formula
+  (`heal_desc_number` in `engine/action/heal.cpp`): Vivify's Mistweaver multiplier, Resurgence's mana per
+  heal. Trinket shields and heals come from the item's level, so a better copy shields more.
+- `heal_tune=<action>:<multiplier>/...` multiplies the named heals and shields of the healer (fixed-amount
+  ones included), for tuning a spec against logs without a rebuild. Unknown names are ignored.
 
 ### Every healer spec
 
@@ -169,7 +182,8 @@ This is a modified version of SimulationCraft (https://github.com/simulationcraf
   `engine/class_modules/sc_shaman_resto_heal.inc`, `engine/class_modules/sc_evoker_preservation_heal.inc` and
   `engine/class_modules/monk/sc_monk_mistweaver_heal.inc` (each carries a notice at its top), and the checks in
   `wowhub/ci/` and `.github/workflows/wowhub-ci.yml`.
-- Modified files (our changes are marked `// wowhub` where they are not obvious): `engine/action/heal.cpp`,
+- Modified files (our changes are marked `// wowhub` where they are not obvious): `engine/action/action.cpp`,
+  `engine/action/heal.cpp`,
   `engine/action/heal.hpp`, `engine/class_modules/sc_enemy.cpp`, `engine/class_modules/sc_druid.cpp`,
   `engine/class_modules/sc_evoker.cpp`, `engine/class_modules/sc_shaman.cpp`,
   `engine/class_modules/priest/sc_priest.cpp`, `engine/class_modules/priest/sc_priest.hpp`,
